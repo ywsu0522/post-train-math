@@ -1,4 +1,4 @@
-from postrain_math_lab.training import (
+from posttrain_math.training import (
     IGNORE_INDEX,
     encode_sft_example,
 )
@@ -107,7 +107,7 @@ def test_prompt_has_no_supervised_position() -> None:
 def test_precision_dtype_mapping() -> None:
     import torch
 
-    from postrain_math_lab.training import _dtype_for_precision
+    from posttrain_math.training import _dtype_for_precision
 
     assert _dtype_for_precision("bf16") is torch.bfloat16
     assert _dtype_for_precision("fp16") is torch.float16
@@ -115,7 +115,7 @@ def test_precision_dtype_mapping() -> None:
 
 
 def test_lora_config_defaults_are_explicit() -> None:
-    from postrain_math_lab.training import build_lora_config
+    from posttrain_math.training import build_lora_config
 
     config = build_lora_config(
         r=16,

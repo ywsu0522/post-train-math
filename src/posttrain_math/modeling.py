@@ -68,7 +68,7 @@ class HFModelRunner:
         model_path: Path,
         *,
         batch_size: int = 1,
-    ) -> "HFModelRunner":
+    ) -> HFModelRunner:
         if batch_size <= 0:
             raise ValueError(
                 "batch_size must be positive"
@@ -267,10 +267,7 @@ class HFModelRunner:
                     "mismatch"
                 )
 
-            for generation in (
-                batch_generations
-            ):
-                yield generation
+            yield from batch_generations
 
     def generate(
         self,

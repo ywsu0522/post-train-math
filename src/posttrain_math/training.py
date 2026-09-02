@@ -28,8 +28,7 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
-from postrain_math_lab.prompting import PromptFormatter, get_prompt_formatter
-
+from posttrain_math.prompting import PromptFormatter, get_prompt_formatter
 
 IGNORE_INDEX = -100
 GIB = 1024**3
@@ -412,7 +411,8 @@ def _gpu_memory() -> dict[str, Any]:
             "reserved_gib": torch.cuda.memory_reserved() / GIB,
             "peak_gib": torch.cuda.max_memory_allocated() / GIB,
         }
-    except Exception:
+    # GPU telemetry is best-effort and must not fail a training run.
+    except Exception:  # noqa: BLE001
         return {"gpu": torch.cuda.get_device_name(0)}
 
 

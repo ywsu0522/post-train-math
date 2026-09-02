@@ -7,14 +7,14 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from postrain_math_lab.answers import (
+from posttrain_math.answers import (
     extract_last_boxed,
     verify_boxed_answers,
 )
-from postrain_math_lab.modeling import (
+from posttrain_math.modeling import (
     TextGenerator,
 )
-from postrain_math_lab.prompting import (
+from posttrain_math.prompting import (
     PromptFormatter,
 )
 

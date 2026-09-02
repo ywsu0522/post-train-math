@@ -4,7 +4,7 @@ from typing import Any
 
 import pandas as pd
 
-from postrain_math_lab.evaluation import (
+from posttrain_math.evaluation import (
     evaluate,
 )
 

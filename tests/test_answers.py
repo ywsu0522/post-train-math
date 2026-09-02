@@ -1,4 +1,4 @@
-from postrain_math_lab.answers import (
+from posttrain_math.answers import (
     classify_boxed_format,
     extract_last_boxed,
 )

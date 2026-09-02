@@ -10,9 +10,15 @@ wheels/
 
 # Virtual environments
 .venv/
+.venv-vllm/
+
+# Local uv caches used by the Windows maintenance scripts
+.uv-cache/
+.uv-tools/
 
 # Downloaded / generated external resources
 data/
 models/
 
-# Bootstrap smoke output is written to /tmp by default.
+# Local experiment outputs, including Trainer checkpoints and final adapters
+runs/

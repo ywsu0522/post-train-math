@@ -1,6 +1,6 @@
 import pandas as pd
 
-from postrain_math_lab.data import (
+from posttrain_math.data import (
     ORIGINAL_COLUMNS,
     add_gt_boxed,
     split_raw_train,
@@ -101,7 +101,7 @@ def test_train_dev_disjoint() -> None:
 def test_download_raw_datasets_materializes_local_parquets(tmp_path, monkeypatch) -> None:
     import pandas as pd
 
-    import postrain_math_lab.data as data_module
+    import posttrain_math.data as data_module
 
     class FakeInfo:
         sha = "dataset-sha"
@@ -150,7 +150,7 @@ def test_download_raw_datasets_materializes_local_parquets(tmp_path, monkeypatch
 
 
 def test_download_raw_datasets_reuses_complete_local_copy(tmp_path, monkeypatch) -> None:
-    import postrain_math_lab.data as data_module
+    import posttrain_math.data as data_module
 
     output_dir = tmp_path / "data"
     output_dir.mkdir(parents=True)

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from postrain_math_lab import resources
+from posttrain_math import resources
 
 
 def test_download_model_records_resolved_commit(tmp_path, monkeypatch) -> None:

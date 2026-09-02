@@ -1,7 +1,7 @@
 [project]
-name = "postrain-math-lab"
+name = "posttrain-math"
 version = "0.1.0"
-description = "Reproducible MATH post-training experiments with SFT, PEFT, evaluation, and RL/vLLM-ready cloud execution."
+description = "Reproducible MATH data preparation, LoRA SFT, and local-model evaluation."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -20,16 +20,8 @@ dependencies = [
     "trl==1.12.0",
 ]
 
-[project.optional-dependencies]
-inference = [
-    "vllm==0.27.1",
-]
-quantization = [
-    "bitsandbytes==0.50.2",
-]
-
 [project.scripts]
-postrain-math = "postrain_math_lab.cli:main"
+posttrain-math = "posttrain_math.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.6,<0.13"]
@@ -38,11 +30,11 @@ build-backend = "uv_build"
 [tool.uv]
 required-version = ">=0.12.6"
 
-[tool.uv.pip]
-torch-backend = "auto"
-
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "ruff>=0.16.5",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

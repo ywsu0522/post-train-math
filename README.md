@@ -1,77 +1,167 @@
-# postrain-math-lab
+# posttrain-math
 
-MATH post-training lab with local-only model execution, deterministic data preparation, LoRA SFT, evaluation, and a cloud stack prepared for quantization and vLLM-backed RL/evaluation work.
+Reproducible post-training experiments for mathematical language models. The current pipeline uses a local Qwen3 base model and the Hendrycks MATH dataset to provide deterministic data preparation, completion-only LoRA SFT, and boxed-answer evaluation.
 
-## Cloud bootstrap (Kaggle / Colab)
+## Scope
 
-Enable an NVIDIA GPU runtime, clone the repo, then run one command:
+The repository currently owns:
 
-```bash
-bash scripts/bootstrap_cloud.sh
+- reproducible dependency metadata and a committed `uv.lock`;
+- explicit model and dataset download commands;
+- deterministic train/dev/test preparation;
+- a one-batch overfit sanity check and LoRA/full-parameter SFT;
+- local-only Hugging Face evaluation with mathematical answer verification.
+
+RL, quantization, and vLLM rollouts are future work. vLLM is intentionally kept in a separate environment so its CUDA/PyTorch wheel constraints cannot change the locked training environment.
+
+## Naming and directories
+
+| Name | Purpose | Git policy |
+| --- | --- | --- |
+| `posttrain-math` | repository, Python distribution, and CLI | committed |
+| `posttrain_math` | importable Python package | committed |
+| `data/` | downloaded raw data and prepared Parquet splits | ignored |
+| `models/` | downloaded base models | ignored |
+| `runs/` | evaluations, training logs, checkpoints, and final adapters | ignored |
+| `examples/reference_runs/` | small historical outputs kept as examples | committed |
+
+Run commands from the repository root. Relative paths in the CLI follow this directory contract.
+
+## Dependency contract
+
+`pyproject.toml` declares constraints; `uv.lock` records the exact cross-platform resolution and must be committed. `.venv/` is always local and must not be committed.
+
+The project requires Python 3.12 and `uv >= 0.12.6`.
+
+On Windows, after changing `pyproject.toml`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/update_lock.ps1
+git add pyproject.toml uv.lock
 ```
 
-The script verifies/installs `uv`, creates an isolated managed-Python-3.12 `.venv`, installs the repo with the GPU-compatible PyTorch backend plus vLLM/bitsandbytes/dev dependencies, downloads the model and MATH dataset, prepares the deterministic split, runs tests/environment checks, and executes a two-example GPU evaluation smoke test.
+On Linux or macOS:
 
-The bootstrap is safe to rerun: a valid existing `.venv`, complete model download, and complete raw dataset are reused.
+```bash
+bash scripts/update_lock.sh
+git add pyproject.toml uv.lock
+```
 
-## Local-resource contract
+For ordinary local checks, use the committed lock without resolving new versions:
 
-The bootstrap downloads:
+```powershell
+uv sync --locked --group dev
+uv run --locked pytest -q
+uv run --locked ruff check src tests
+```
+
+## Colab T4 workflow
+
+Enable a T4 GPU runtime, clone the GitHub repository, change into it, and run:
+
+```bash
+bash scripts/bootstrap_colab.sh
+```
+
+Bootstrap performs these steps once per fresh Colab runtime:
+
+1. install or update `uv`;
+2. verify the committed lock and create `.venv/`;
+3. verify CUDA is visible inside the locked environment;
+4. download the model and raw dataset;
+5. prepare deterministic data splits;
+6. run unit tests, an environment check, and a two-example GPU evaluation.
+
+The downloads are resumable/reusable when their manifests and expected files are present. Training and evaluation never download resources implicitly.
+
+The resulting local resources are:
 
 ```text
-Qwen/Qwen3-1.7B-Base -> models/qwen3-1.7b-base/
+Qwen/Qwen3-1.7B-Base  -> models/qwen3-1.7b-base/
 EleutherAI/hendrycks_math -> data/raw/
-                           -> data/processed/
+                            -> data/processed/
 ```
 
-Training and evaluation accept local model/data paths only. `models/`, `data/`, and `.venv/` are intentionally ignored by Git.
-
-Manual download commands, when needed:
+The same resource steps can be run manually:
 
 ```bash
-.venv/bin/postrain-math model download
-.venv/bin/postrain-math data download
-.venv/bin/postrain-math data prepare
+uv run --locked posttrain-math model download
+uv run --locked posttrain-math data download
+uv run --locked posttrain-math data prepare
+uv run --locked posttrain-math environment
 ```
 
-## Sanity training
+## Training
 
-LoRA one-batch overfit:
+Start with the one-batch LoRA overfit check:
 
 ```bash
-.venv/bin/postrain-math train overfit-one-batch \
+uv run --locked posttrain-math train overfit-one-batch \
   --peft lora \
   --precision auto
 ```
 
-Defaults: LoRA `r=16`, `alpha=32`, `dropout=0.05`, `target_modules=all-linear`, learning rate `2e-4`.
-
-Full-parameter sanity path:
+Then run LoRA SFT:
 
 ```bash
-.venv/bin/postrain-math train overfit-one-batch \
-  --peft none \
-  --learning-rate 1e-4 \
-  --precision auto
-```
-
-## LoRA SFT
-
-```bash
-.venv/bin/postrain-math train sft \
+uv run --locked posttrain-math train sft \
+  --output-dir runs/qwen3-1.7b-lora-sft-v1 \
   --peft lora \
   --precision auto \
   --gradient-checkpointing
 ```
 
-Default SFT learning rate is `2e-4` for LoRA and `2e-5` for full-parameter SFT.
+Defaults are LoRA `r=16`, `alpha=32`, `dropout=0.05`, `target_modules=all-linear`, and learning rate `2e-4`. Full-parameter SFT defaults to `2e-5`.
+
+Each SFT run stores Hugging Face `checkpoint-*` directories and a `final-model/` under its output directory. Resume an interrupted run explicitly:
+
+```bash
+uv run --locked posttrain-math train sft \
+  --output-dir runs/my-experiment \
+  --resume-from-checkpoint runs/my-experiment/checkpoint-100
+```
 
 ## Evaluation
 
+Evaluate the base model on the dev split:
+
 ```bash
-.venv/bin/postrain-math eval \
+uv run --locked posttrain-math eval \
   --split dev \
   --prompt boxed
 ```
 
-A saved LoRA adapter can be evaluated by passing its local `final-model` directory; its adapter metadata points to the local base-model directory used during training.
+Evaluate a saved LoRA adapter by pointing `--model` at its `final-model/` directory:
+
+```bash
+uv run --locked posttrain-math eval \
+  --model runs/my-experiment/final-model \
+  --split dev \
+  --prompt boxed
+```
+
+## Keeping Colab checkpoints
+
+The default `runs/` directory is fast Colab-local storage and disappears when the runtime is recycled. At the end of a run, copy the whole experiment directory to Google Drive or download it to Windows; keeping the entire directory preserves configuration, logs, intermediate checkpoints, tokenizer files, and the final adapter together.
+
+For crash resilience, mount Google Drive and pass a Drive path directly, accepting slower checkpoint writes:
+
+```bash
+uv run --locked posttrain-math train sft \
+  --output-dir /content/drive/MyDrive/posttrain-math/runs/my-experiment \
+  --peft lora \
+  --precision auto \
+  --gradient-checkpointing
+```
+
+Do not copy downloaded `models/` or `data/` unless avoiding their next-runtime download is worth the storage; both can be recreated from their recorded source revisions.
+
+## Optional vLLM environment
+
+When rollout or server-backed evaluation work begins:
+
+```bash
+bash scripts/setup_vllm.sh
+```
+
+This creates `.venv-vllm/` and installs the pinned vLLM version using the GPU-compatible PyTorch backend. It is separate from `.venv/` by design.

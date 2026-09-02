@@ -6,7 +6,6 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
 
-
 DEFAULT_MODEL_REPO = "Qwen/Qwen3-1.7B-Base"
 DEFAULT_MODEL_DIR = Path("models/qwen3-1.7b-base")
 

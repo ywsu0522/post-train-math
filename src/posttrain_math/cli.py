@@ -1,37 +1,36 @@
 import argparse
 from pathlib import Path
 
-from postrain_math_lab.data import (
+from posttrain_math.data import (
     HENDRYCKS_MATH_REPO,
     download_raw_datasets,
     inspect_raw_datasets,
     prepare_datasets,
 )
-from postrain_math_lab.environment import (
+from posttrain_math.environment import (
     inspect_environment,
     print_environment_report,
 )
-from postrain_math_lab.evaluation import (
+from posttrain_math.evaluation import (
     evaluate,
 )
-from postrain_math_lab.modeling import (
+from posttrain_math.modeling import (
     HFModelRunner,
 )
-from postrain_math_lab.prompting import (
+from posttrain_math.prompting import (
     PROMPT_STRATEGIES,
     get_prompt_formatter,
 )
-from postrain_math_lab.resources import (
+from posttrain_math.resources import (
     DEFAULT_MODEL_DIR,
     DEFAULT_MODEL_REPO,
     download_model,
 )
-from postrain_math_lab.training import (
+from posttrain_math.training import (
     inspect_sft_data,
     overfit_one_batch,
     train_sft,
 )
-
 
 DEFAULT_TRAIN_DATASET = Path(
     "data/raw/math_train.parquet"
@@ -79,7 +78,7 @@ def _add_training_data_args(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="postrain-math",
+        prog="posttrain-math",
         description=(
             "Research engineering lab for "
             "mathematical LLM post-training."

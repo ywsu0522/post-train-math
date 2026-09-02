@@ -1,4 +1,4 @@
-from postrain_math_lab.prompting import (
+from posttrain_math.prompting import (
     PROMPT_STRATEGIES,
     format_boxed_cot_prompt,
     format_boxed_prompt,

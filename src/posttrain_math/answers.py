@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import os
+from dataclasses import dataclass
 
 from math_verify import parse, verify
 from math_verify.parser import LatexExtractionConfig
-
 
 _IS_WINDOWS = os.name == "nt"
 
@@ -256,7 +255,8 @@ def parse_boxed_answer(
                 _PARSE_TIMEOUT_SECONDS
             ),
         )
-    except Exception:
+    # math_verify can surface backend-specific parser failures.
+    except Exception:  # noqa: BLE001
         return None
 
     return parsed if parsed else None
@@ -298,7 +298,8 @@ def verify_boxed_answers(
                 ),
             )
         )
-    except Exception:
+    # Treat any math_verify backend failure as an incorrect prediction.
+    except Exception:  # noqa: BLE001
         correct = False
 
     return correct, True, True
