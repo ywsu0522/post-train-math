@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from posttrain_math.training import (
@@ -116,6 +118,13 @@ def test_precision_dtype_mapping() -> None:
     assert _dtype_for_precision("bf16") is torch.bfloat16
     assert _dtype_for_precision("fp16") is torch.float16
     assert _dtype_for_precision("fp32") is torch.float32
+
+
+def test_training_uses_headless_matplotlib_backend() -> None:
+    import matplotlib
+
+    assert os.environ["MPLBACKEND"] == "Agg"
+    assert matplotlib.get_backend().lower() == "agg"
 
 
 def test_auto_precision_requires_native_bf16(monkeypatch) -> None:

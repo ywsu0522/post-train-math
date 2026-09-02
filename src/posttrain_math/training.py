@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -10,6 +11,10 @@ from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
+# Colab may export its notebook-only inline backend into child processes. The
+# training CLI only writes plots to files, so select the headless backend before
+# importing Matplotlib and before it reads MPLBACKEND.
+os.environ["MPLBACKEND"] = "Agg"
 import matplotlib
 
 matplotlib.use("Agg")
