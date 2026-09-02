@@ -28,6 +28,7 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
+from posttrain_math.environment import native_bf16_supported
 from posttrain_math.prompting import PromptFormatter, get_prompt_formatter
 
 IGNORE_INDEX = -100
@@ -329,11 +330,11 @@ def _resolve_precision(precision: str) -> str:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for SFT.")
     if precision == "auto":
-        return "bf16" if torch.cuda.is_bf16_supported() else "fp16"
+        return "bf16" if native_bf16_supported() else "fp16"
     if precision not in {"bf16", "fp16", "fp32"}:
         raise ValueError(f"Unknown precision: {precision}")
-    if precision == "bf16" and not torch.cuda.is_bf16_supported():
-        raise RuntimeError("BF16 requested but GPU does not report BF16 support.")
+    if precision == "bf16" and not native_bf16_supported():
+        raise RuntimeError("BF16 requested but GPU has no native BF16 support.")
     return precision
 
 
@@ -825,6 +826,14 @@ def _git_commit() -> str | None:
         return None
 
 
+def build_sft_config(*, warmup_ratio: float, **kwargs: Any) -> SFTConfig:
+    if not 0.0 <= warmup_ratio <= 1.0:
+        raise ValueError("warmup_ratio must be between 0 and 1.")
+
+    # Transformers 5 uses a fractional warmup_steps value as the ratio.
+    return SFTConfig(warmup_steps=warmup_ratio, **kwargs)
+
+
 def train_sft(
     *,
     model_path: Path,
@@ -997,7 +1006,8 @@ def train_sft(
             max_grad_norm=max_grad_norm,
         )
 
-        args = SFTConfig(
+        args = build_sft_config(
+            warmup_ratio=warmup_ratio,
             output_dir=str(output_dir),
             num_train_epochs=epochs,
             learning_rate=learning_rate,
@@ -1005,7 +1015,6 @@ def train_sft(
             per_device_eval_batch_size=eval_batch_size,
             gradient_accumulation_steps=gradient_accumulation,
             weight_decay=weight_decay,
-            warmup_ratio=warmup_ratio,
             lr_scheduler_type=scheduler,
             max_grad_norm=max_grad_norm,
             optim=optim,

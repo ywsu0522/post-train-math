@@ -12,6 +12,8 @@ from transformers import (
     AutoTokenizer,
 )
 
+from posttrain_math.environment import native_bf16_supported
+
 
 class TextGenerator(Protocol):
     def iter_generate(
@@ -112,7 +114,7 @@ class HFModelRunner:
 
         dtype = (
             torch.bfloat16
-            if torch.cuda.is_bf16_supported()
+            if native_bf16_supported()
             else torch.float16
         )
 

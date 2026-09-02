@@ -5,6 +5,12 @@ from pathlib import Path
 import torch
 
 
+def native_bf16_supported() -> bool:
+    return torch.cuda.is_available() and torch.cuda.is_bf16_supported(
+        including_emulation=False
+    )
+
+
 @dataclass(frozen=True)
 class EnvironmentReport:
     python_version: str
@@ -40,7 +46,7 @@ def inspect_environment(
 
     if cuda_available:
         gpu_name = torch.cuda.get_device_name(0)
-        bf16_supported = torch.cuda.is_bf16_supported()
+        bf16_supported = native_bf16_supported()
 
     return EnvironmentReport(
         python_version=platform.python_version(),

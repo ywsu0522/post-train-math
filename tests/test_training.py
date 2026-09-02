@@ -1,5 +1,9 @@
+import pytest
+
 from posttrain_math.training import (
     IGNORE_INDEX,
+    _resolve_precision,
+    build_sft_config,
     encode_sft_example,
 )
 
@@ -114,6 +118,21 @@ def test_precision_dtype_mapping() -> None:
     assert _dtype_for_precision("fp32") is torch.float32
 
 
+def test_auto_precision_requires_native_bf16(monkeypatch) -> None:
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        torch.cuda,
+        "is_bf16_supported",
+        lambda *, including_emulation=True: including_emulation,
+    )
+
+    assert _resolve_precision("auto") == "fp16"
+    with pytest.raises(RuntimeError, match="native BF16"):
+        _resolve_precision("bf16")
+
+
 def test_lora_config_defaults_are_explicit() -> None:
     from posttrain_math.training import build_lora_config
 
@@ -129,3 +148,16 @@ def test_lora_config_defaults_are_explicit() -> None:
     assert config.lora_dropout == 0.05
     assert config.target_modules == "all-linear"
     assert config.bias == "none"
+
+
+def test_sft_config_translates_warmup_ratio(tmp_path) -> None:
+    config = build_sft_config(
+        output_dir=str(tmp_path),
+        warmup_ratio=0.03,
+        bf16=False,
+        fp16=False,
+        use_cpu=True,
+    )
+
+    assert config.warmup_steps == 0.03
+    assert config.get_warmup_steps(100) == 3
