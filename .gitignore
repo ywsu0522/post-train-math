@@ -4,10 +4,15 @@ __pycache__/
 build/
 dist/
 wheels/
-*.egg-info
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 
 # Virtual environments
-.venv
+.venv/
 
+# Downloaded / generated external resources
 data/
 models/
+
+# Bootstrap smoke output is written to /tmp by default.

@@ -1,30 +1,45 @@
 [project]
 name = "postrain-math-lab"
 version = "0.1.0"
-description = "Add your description here"
+description = "Reproducible MATH post-training experiments with SFT, PEFT, evaluation, and RL/vLLM-ready cloud execution."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
+    "datasets>=4,<5",
+    "huggingface-hub>=0.34,<2",
+    "math-verify[antlr4-13-2]==0.9.0",
+    "matplotlib>=3.10,<4",
+    "numpy>=2,<3",
     "pandas>=3.0.5",
+    "peft==0.20.0",
     "pyarrow>=25.0.1",
+    "scikit-learn>=1.9.0",
+    "tabulate>=0.10.0",
     "torch==2.13.0",
-    "transformers>=4.51,<6",
+    "transformers>=5.5.3,<6",
+    "trl==1.12.0",
+]
+
+[project.optional-dependencies]
+inference = [
+    "vllm==0.27.1",
+]
+quantization = [
+    "bitsandbytes==0.50.2",
 ]
 
 [project.scripts]
 postrain-math = "postrain_math_lab.cli:main"
 
 [build-system]
-requires = ["uv_build>=0.12.5,<0.13.0"]
+requires = ["uv_build>=0.12.6,<0.13"]
 build-backend = "uv_build"
 
-[tool.uv.sources]
-torch = { index = "pytorch-cu126" }
+[tool.uv]
+required-version = ">=0.12.6"
 
-[[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
-explicit = true
+[tool.uv.pip]
+torch-backend = "auto"
 
 [dependency-groups]
 dev = [

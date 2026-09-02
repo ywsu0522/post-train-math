@@ -1,0 +1,42 @@
+{
+  "split": "dev",
+  "prompt_strategy": "plain",
+  "generator": {
+    "model_path": "models\\qwen3-0.6b-base",
+    "backend": "huggingface-transformers",
+    "torch": "2.13.0+cu126",
+    "transformers": "5.16.1",
+    "device": "cuda",
+    "dtype": "torch.bfloat16",
+    "gpu": "NVIDIA GeForce MX250",
+    "batch_size": 4
+  },
+  "generation_config": {
+    "do_sample": false,
+    "max_new_tokens": 1024
+  },
+  "token_diagnostics": {
+    "prompt_tokens": {
+      "p50": 51.0,
+      "max": 90
+    },
+    "gold_solution_tokens": {
+      "p50": 157.5,
+      "max": 191
+    },
+    "max_new_tokens": 1024,
+    "gold_solution_over_budget": {
+      "count": 0,
+      "ratio": 0.0
+    }
+  },
+  "num_examples": 8,
+  "num_gt_boxed": 8,
+  "num_gt_parseable": 8,
+  "num_pred_boxed": 1,
+  "num_pred_parseable": 1,
+  "num_correct": 0,
+  "gt_boxed_coverage": 1.0,
+  "boxed_output_rate": 0.125,
+  "accuracy": 0.0
+}
