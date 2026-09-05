@@ -80,7 +80,11 @@ def init_process_group_if_needed(context: DistributedContext) -> bool:
         return False
 
     backend = "nccl" if context.device.type == "cuda" else "gloo"
-    dist.init_process_group(backend=backend, init_method="env://")
+    dist.init_process_group(
+        backend=backend,
+        init_method="env://",
+        device_id=context.device if context.device.type == "cuda" else None,
+    )
     return True
 
 
