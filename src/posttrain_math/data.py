@@ -16,6 +16,7 @@ from tabulate import tabulate
 from posttrain_math.answers import (
     classify_boxed_format,
     extract_last_boxed,
+    parse_boxed_answer,
 )
 
 ORIGINAL_COLUMNS = [
@@ -324,6 +325,19 @@ def add_gt_boxed(
         .map(extract_last_boxed)
     )
 
+    return result
+
+
+def add_eval_eligibility(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    if "gt_boxed" not in df.columns:
+        raise ValueError("gt_boxed must exist before evaluation eligibility is computed")
+
+    result = df.copy()
+    result["eval_eligible"] = result["gt_boxed"].map(
+        lambda answer: parse_boxed_answer(answer) is not None
+    )
     return result
 
 
@@ -814,6 +828,18 @@ def print_processed_boxed_report(
         f"{_format_count(missing, len(df))}"
     )
 
+    if "eval_eligible" in df.columns:
+        eligible = int(df["eval_eligible"].astype(bool).sum())
+        excluded = len(df) - eligible
+        print(
+            "- eval eligible: "
+            f"{_format_count(eligible, len(df))}"
+        )
+        print(
+            "- eval excluded: "
+            f"{_format_count(excluded, len(df))}"
+        )
+
 
 def _processed_invariants(
     raw_train: pd.DataFrame,
@@ -851,6 +877,7 @@ def _processed_invariants(
         == [
             *raw_test_columns,
             "gt_boxed",
+            "eval_eligible",
         ]
     )
 
@@ -888,6 +915,17 @@ def _processed_invariants(
                 for frame
                 in (
                     train,
+                    dev,
+                    test,
+                )
+            ),
+
+        "eval_eligibility_exists":
+            all(
+                "eval_eligible"
+                in frame.columns
+                for frame
+                in (
                     dev,
                     test,
                 )
@@ -997,7 +1035,11 @@ def prepare_datasets(
         )
     )
 
-    test_df = (
+    dev_df = add_eval_eligibility(
+        dev_df
+    )
+
+    test_df = add_eval_eligibility(
         processed_test
         .reset_index(drop=True)
     )
@@ -1099,8 +1141,12 @@ def prepare_datasets(
         "train/dev/test: [PASS]"
     )
     print(
+        "- eval eligibility exists in "
+        "dev/test: [PASS]"
+    )
+    print(
         "- raw test == processed test "
-        "except gt_boxed: [PASS]"
+        "except evaluation metadata: [PASS]"
     )
 
     print()
@@ -1155,6 +1201,18 @@ def prepare_datasets(
                 len(dev_df),
             "test_rows":
                 len(test_df),
+        },
+        "evaluation_cohort": {
+            "definition":
+                "gt_boxed parseable by locked math-verify",
+            "dev_eligible_rows":
+                int(dev_df["eval_eligible"].astype(bool).sum()),
+            "dev_excluded_rows":
+                int((~dev_df["eval_eligible"].astype(bool)).sum()),
+            "test_eligible_rows":
+                int(test_df["eval_eligible"].astype(bool).sum()),
+            "test_excluded_rows":
+                int((~test_df["eval_eligible"].astype(bool)).sum()),
         },
         "invariants":
             invariants,

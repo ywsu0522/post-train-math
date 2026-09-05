@@ -179,10 +179,7 @@ def _assert_contract(examples: list[EncodedSFTExample], *, tokenizer) -> None:
 def _length_stats(values: list[int]) -> dict[str, float | int]:
     x = np.asarray(values, dtype=np.int64)
     return {
-        "p50": float(np.quantile(x, 0.50)),
-        "p90": float(np.quantile(x, 0.90)),
-        "p95": float(np.quantile(x, 0.95)),
-        "p99": float(np.quantile(x, 0.99)),
+        "median": float(np.median(x)),
         "max": int(x.max()),
     }
 
@@ -190,10 +187,7 @@ def _length_stats(values: list[int]) -> dict[str, float | int]:
 def _print_lengths(name: str, values: list[int]) -> None:
     s = _length_stats(values)
     print(name)
-    print(f"- p50: {s['p50']:.0f}")
-    print(f"- p90: {s['p90']:.0f}")
-    print(f"- p95: {s['p95']:.0f}")
-    print(f"- p99: {s['p99']:.0f}")
+    print(f"- median: {s['median']:.0f}")
     print(f"- max: {s['max']}")
 
 

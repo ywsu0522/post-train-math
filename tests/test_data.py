@@ -2,6 +2,7 @@ import pandas as pd
 
 from posttrain_math.data import (
     ORIGINAL_COLUMNS,
+    add_eval_eligibility,
     add_gt_boxed,
     split_raw_train,
 )
@@ -51,6 +52,14 @@ def test_add_gt_boxed() -> None:
 
     assert "gt_boxed" in df.columns
     assert df.iloc[0]["gt_boxed"] == "0"
+
+
+def test_add_eval_eligibility() -> None:
+    df = make_dataset().iloc[:2].copy()
+    df.loc[df.index[1], "solution"] = "no boxed answer"
+    df = add_eval_eligibility(add_gt_boxed(df))
+
+    assert df["eval_eligible"].tolist() == [True, False]
 
 
 def test_split_is_deterministic() -> None:

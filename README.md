@@ -1,6 +1,6 @@
 # posttrain-math
 
-Reproducible post-training experiments for mathematical language models. The current pipeline uses a local Qwen3 base model and the Hendrycks MATH dataset to provide deterministic data preparation, completion-only LoRA SFT, and boxed-answer evaluation.
+Reproducible post-training experiments for mathematical language models. The current pipeline uses a local OLMo 1B base model and the Hendrycks MATH dataset to provide deterministic data preparation, completion-only LoRA SFT, and boxed-answer evaluation.
 
 ## Scope
 
@@ -77,9 +77,18 @@ The downloads are resumable/reusable when their manifests and expected files are
 The resulting local resources are:
 
 ```text
-Qwen/Qwen3-1.7B-Base  -> models/qwen3-1.7b-base/
+allenai/OLMo-1B-0724-hf -> models/olmo-1b-0724-hf/
 EleutherAI/hendrycks_math -> data/raw/
                             -> data/processed/
+```
+
+
+Qwen remains available through the generic model download interface when an explicit comparison is wanted:
+
+```bash
+uv run --locked posttrain-math model download \
+  --repo-id Qwen/Qwen3-1.7B-Base \
+  --output-dir models/qwen3-1.7b-base
 ```
 
 The same resource steps can be run manually:
@@ -105,7 +114,7 @@ Then run LoRA SFT:
 
 ```bash
 uv run --locked posttrain-math train sft \
-  --output-dir runs/qwen3-1.7b-lora-sft-v1 \
+  --output-dir runs/olmo-1b-lora-sft-v1 \
   --peft lora \
   --precision auto \
   --gradient-checkpointing
@@ -123,6 +132,8 @@ uv run --locked posttrain-math train sft \
 
 ## Evaluation
 
+Evaluation uses the fixed parseable-gold cohort materialized by `data prepare` and reports overall accuracy plus breakdowns by MATH level and problem type. Use the same prompt strategy and generation budget for every model snapshot.
+
 Evaluate the base model on the dev split:
 
 ```bash
@@ -131,7 +142,16 @@ uv run --locked posttrain-math eval \
   --prompt boxed
 ```
 
-Evaluate a saved LoRA adapter by pointing `--model` at its `final-model/` directory:
+Evaluate a saved checkpoint or final LoRA adapter with `--model`:
+
+```bash
+uv run --locked posttrain-math eval \
+  --model runs/my-experiment/checkpoint-100 \
+  --split dev \
+  --prompt boxed
+```
+
+Evaluate the final adapter by pointing `--model` at its `final-model/` directory:
 
 ```bash
 uv run --locked posttrain-math eval \
