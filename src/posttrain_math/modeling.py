@@ -12,6 +12,7 @@ from transformers import (
     AutoTokenizer,
 )
 
+from posttrain_math.distributed import get_distributed_context
 from posttrain_math.environment import native_bf16_supported
 
 
@@ -53,9 +54,11 @@ class HFModelRunner:
         model_path: Path,
         model,
         tokenizer,
-        device: str,
+        device: torch.device,
         dtype: torch.dtype,
         batch_size: int,
+        rank: int,
+        world_size: int,
     ) -> None:
         self.model_path = model_path
         self.model = model
@@ -63,6 +66,8 @@ class HFModelRunner:
         self.device = device
         self.dtype = dtype
         self.batch_size = batch_size
+        self.rank = rank
+        self.world_size = world_size
 
     @classmethod
     def from_pretrained(
@@ -72,9 +77,7 @@ class HFModelRunner:
         batch_size: int = 1,
     ) -> HFModelRunner:
         if batch_size <= 0:
-            raise ValueError(
-                "batch_size must be positive"
-            )
+            raise ValueError("batch_size must be positive")
 
         if not model_path.is_dir():
             raise FileNotFoundError(
@@ -82,33 +85,19 @@ class HFModelRunner:
                 f"{model_path}"
             )
 
-        if not torch.cuda.is_available():
-            raise RuntimeError(
-                "CUDA is required "
-                "for evaluation"
-            )
+        context = get_distributed_context()
 
-        tokenizer = (
-            AutoTokenizer
-            .from_pretrained(
-                model_path,
-                local_files_only=True,
-            )
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            local_files_only=True,
         )
 
         if tokenizer.pad_token_id is None:
-            if (
-                tokenizer.eos_token_id
-                is None
-            ):
+            if tokenizer.eos_token_id is None:
                 raise RuntimeError(
-                    "Tokenizer has neither "
-                    "pad_token nor eos_token"
+                    "Tokenizer has neither pad_token nor eos_token"
                 )
-
-            tokenizer.pad_token = (
-                tokenizer.eos_token
-            )
+            tokenizer.pad_token = tokenizer.eos_token
 
         tokenizer.padding_side = "left"
 
@@ -148,16 +137,18 @@ class HFModelRunner:
                 dtype=dtype,
             )
 
-        model.to("cuda")
+        model.to(context.device)
         model.eval()
 
         return cls(
             model_path=model_path,
             model=model,
             tokenizer=tokenizer,
-            device="cuda",
+            device=context.device,
             dtype=dtype,
             batch_size=batch_size,
+            rank=context.rank,
+            world_size=context.world_size,
         )
 
     def count_tokens(
@@ -189,8 +180,7 @@ class HFModelRunner:
     ) -> Iterator[str]:
         if max_new_tokens <= 0:
             raise ValueError(
-                "max_new_tokens must "
-                "be positive"
+                "max_new_tokens must be positive"
             )
 
         for start in range(
@@ -210,63 +200,33 @@ class HFModelRunner:
                 truncation=False,
             )
 
-            input_width = (
-                encoded[
-                    "input_ids"
-                ].shape[1]
-            )
+            input_width = encoded["input_ids"].shape[1]
 
             encoded = {
-                key:
-                    value.to(
-                        self.device
-                    )
-                for key, value
-                in encoded.items()
+                key: value.to(self.device)
+                for key, value in encoded.items()
             }
 
             with torch.inference_mode():
-                output_ids = (
-                    self.model.generate(
-                        **encoded,
-                        do_sample=do_sample,
-                        max_new_tokens=(
-                            max_new_tokens
-                        ),
-                        pad_token_id=(
-                            self.tokenizer
-                            .pad_token_id
-                        ),
-                        eos_token_id=(
-                            self.tokenizer
-                            .eos_token_id
-                        ),
-                        use_cache=True,
-                    )
+                output_ids = self.model.generate(
+                    **encoded,
+                    do_sample=do_sample,
+                    max_new_tokens=max_new_tokens,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    use_cache=True,
                 )
 
-            continuation_ids = (
-                output_ids[
-                    :,
-                    input_width:,
-                ]
+            continuation_ids = output_ids[:, input_width:]
+
+            batch_generations = self.tokenizer.batch_decode(
+                continuation_ids,
+                skip_special_tokens=True,
             )
 
-            batch_generations = (
-                self.tokenizer
-                .batch_decode(
-                    continuation_ids,
-                    skip_special_tokens=True,
-                )
-            )
-
-            if (
-                len(batch_generations)
-                != len(batch_prompts)
-            ):
+            if len(batch_generations) != len(batch_prompts):
                 raise RuntimeError(
-                    "Generation count "
-                    "mismatch"
+                    "Generation count mismatch"
                 )
 
             yield from batch_generations
@@ -281,9 +241,7 @@ class HFModelRunner:
         return list(
             self.iter_generate(
                 prompts,
-                max_new_tokens=(
-                    max_new_tokens
-                ),
+                max_new_tokens=max_new_tokens,
                 do_sample=do_sample,
             )
         )
@@ -292,21 +250,14 @@ class HFModelRunner:
         self,
     ) -> dict[str, Any]:
         return {
-            "model_path":
-                str(self.model_path),
-            "backend":
-                "huggingface-transformers",
-            "torch":
-                torch.__version__,
-            "transformers":
-                transformers.__version__,
-            "device":
-                self.device,
-            "dtype":
-                str(self.dtype),
-            "gpu":
-                torch.cuda
-                .get_device_name(0),
-            "batch_size":
-                self.batch_size,
+            "model_path": str(self.model_path),
+            "backend": "huggingface-transformers",
+            "torch": torch.__version__,
+            "transformers": transformers.__version__,
+            "device": str(self.device),
+            "dtype": str(self.dtype),
+            "gpu": torch.cuda.get_device_name(self.device),
+            "batch_size": self.batch_size,
+            "rank": self.rank,
+            "world_size": self.world_size,
         }

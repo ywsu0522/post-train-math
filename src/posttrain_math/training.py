@@ -33,6 +33,10 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
+from posttrain_math.distributed import (
+    get_distributed_context,
+    resolve_gradient_accumulation,
+)
 from posttrain_math.environment import native_bf16_supported
 from posttrain_math.prompting import PromptFormatter, get_prompt_formatter
 
@@ -402,18 +406,20 @@ def _gpu_memory() -> dict[str, Any]:
     if not torch.cuda.is_available():
         return {}
     try:
-        free, total = torch.cuda.mem_get_info()
+        device = torch.cuda.current_device()
+        free, total = torch.cuda.mem_get_info(device)
         return {
-            "gpu": torch.cuda.get_device_name(0),
+            "gpu": torch.cuda.get_device_name(device),
+            "device": device,
             "total_gib": total / GIB,
             "free_gib": free / GIB,
-            "allocated_gib": torch.cuda.memory_allocated() / GIB,
-            "reserved_gib": torch.cuda.memory_reserved() / GIB,
-            "peak_gib": torch.cuda.max_memory_allocated() / GIB,
+            "allocated_gib": torch.cuda.memory_allocated(device) / GIB,
+            "reserved_gib": torch.cuda.memory_reserved(device) / GIB,
+            "peak_gib": torch.cuda.max_memory_allocated(device) / GIB,
         }
     # GPU telemetry is best-effort and must not fail a training run.
     except Exception:  # noqa: BLE001
-        return {"gpu": torch.cuda.get_device_name(0)}
+        return {"gpu": torch.cuda.get_device_name(torch.cuda.current_device())}
 
 
 def _print_gpu(title: str) -> None:
@@ -543,6 +549,13 @@ def overfit_one_batch(
     if peft_method not in {"none", "lora"}:
         raise ValueError("peft_method must be 'none' or 'lora'.")
 
+    context = get_distributed_context()
+    if context.world_size != 1:
+        raise RuntimeError(
+            "overfit-one-batch is intentionally single-GPU. "
+            "Launch it with one process."
+        )
+
     precision = _resolve_precision(precision)
     random.seed(seed)
     torch.manual_seed(seed)
@@ -558,7 +571,7 @@ def overfit_one_batch(
     )
     chosen = random.Random(seed).sample(examples, min(batch_size, len(examples)))
     batch = _make_collator(tokenizer)([ex.as_record() for ex in chosen])
-    batch = {key: value.to("cuda") for key, value in batch.items()}
+    batch = {key: value.to(context.device) for key, value in batch.items()}
 
     output_dir.mkdir(parents=True, exist_ok=True)
     log_path = output_dir / "overfit_log.jsonl"
@@ -578,7 +591,7 @@ def overfit_one_batch(
                     target_modules=lora_target_modules,
                 ),
             )
-        model = model.to("cuda")
+        model = model.to(context.device)
         model.train()
         optimizer = torch.optim.AdamW(
             (p for p in model.parameters() if p.requires_grad),
@@ -700,15 +713,23 @@ def overfit_one_batch(
 
 
 class TrainingLogCallback(TrainerCallback):
-    def __init__(self, log_path: Path, max_grad_norm: float) -> None:
+    def __init__(
+        self,
+        log_path: Path,
+        max_grad_norm: float,
+        *,
+        enabled: bool = True,
+    ) -> None:
         self.log_path = log_path
         self.max_grad_norm = max_grad_norm
+        self.enabled = enabled
         self.grad_points = 0
         self.clipped_points = 0
-        self.log_path.write_text("", encoding="utf-8")
+        if self.enabled:
+            self.log_path.write_text("", encoding="utf-8")
 
     def on_log(self, args, state, control, logs=None, **kwargs):
-        if not logs:
+        if not self.enabled or not logs:
             return control
 
         record: dict[str, Any] = {
@@ -845,7 +866,8 @@ def train_sft(
     learning_rate: float,
     batch_size: int,
     eval_batch_size: int,
-    gradient_accumulation: int,
+    gradient_accumulation: int | None,
+    global_batch_size: int | None,
     weight_decay: float,
     warmup_ratio: float,
     scheduler: str,
@@ -865,14 +887,26 @@ def train_sft(
     seed: int,
     resume_from_checkpoint: Path | None,
 ) -> None:
-    if min(batch_size, eval_batch_size, gradient_accumulation) <= 0:
-        raise ValueError("batch sizes and gradient_accumulation must be positive.")
+    if min(batch_size, eval_batch_size) <= 0:
+        raise ValueError("batch sizes must be positive.")
+    if gradient_accumulation is not None and gradient_accumulation <= 0:
+        raise ValueError("gradient_accumulation must be positive.")
+    if global_batch_size is not None and global_batch_size <= 0:
+        raise ValueError("global_batch_size must be positive.")
     if min(logging_steps, eval_steps, save_steps) <= 0:
         raise ValueError("logging/eval/save steps must be positive.")
     if epochs <= 0 or learning_rate <= 0:
         raise ValueError("epochs and learning_rate must be positive.")
     if peft_method not in {"none", "lora"}:
         raise ValueError("peft_method must be 'none' or 'lora'.")
+
+    context = get_distributed_context()
+    gradient_accumulation, effective_batch = resolve_gradient_accumulation(
+        per_device_batch_size=batch_size,
+        world_size=context.world_size,
+        gradient_accumulation=gradient_accumulation,
+        global_batch_size=global_batch_size,
+    )
 
     precision = _resolve_precision(precision)
     random.seed(seed)
@@ -920,7 +954,6 @@ def train_sft(
 
         trainable = _trainable_params(model)
         total = sum(p.numel() for p in model.parameters())
-        effective_batch = batch_size * gradient_accumulation
         estimated_steps = math.ceil(
             math.ceil(len(train_dataset) / effective_batch) * epochs
         )
@@ -930,9 +963,10 @@ def train_sft(
         print(f"- prompt: {prompt_name}")
         print(f"- train/dev examples: {len(train_dataset)} / {len(dev_dataset)}")
         print(f"- max_length: {max_length}")
-        print(f"- train/eval batch size: {batch_size} / {eval_batch_size}")
+        print(f"- train/eval batch size per device: {batch_size} / {eval_batch_size}")
+        print(f"- world size: {context.world_size}")
         print(f"- gradient accumulation: {gradient_accumulation}")
-        print(f"- effective batch size: {effective_batch}")
+        print(f"- global effective batch size: {effective_batch}")
         print(f"- epochs: {epochs}")
         print(f"- estimated optimizer steps: {estimated_steps}")
         print(f"- optimizer: {optim}")
@@ -962,10 +996,12 @@ def train_sft(
             "dev_examples": len(dev_dataset),
             "epochs": epochs,
             "learning_rate": learning_rate,
-            "batch_size": batch_size,
-            "eval_batch_size": eval_batch_size,
+            "per_device_batch_size": batch_size,
+            "per_device_eval_batch_size": eval_batch_size,
+            "world_size": context.world_size,
             "gradient_accumulation": gradient_accumulation,
-            "effective_batch_size": effective_batch,
+            "global_batch_size_requested": global_batch_size,
+            "global_effective_batch_size": effective_batch,
             "weight_decay": weight_decay,
             "warmup_ratio": warmup_ratio,
             "scheduler": scheduler,
@@ -995,14 +1031,16 @@ def train_sft(
             "peft": version("peft"),
             "datasets": version("datasets"),
         }
-        (output_dir / "run_config.json").write_text(
-            json.dumps(run_config, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        if context.is_main_process:
+            (output_dir / "run_config.json").write_text(
+                json.dumps(run_config, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
 
         callback = TrainingLogCallback(
             output_dir / "train_log.jsonl",
             max_grad_norm=max_grad_norm,
+            enabled=context.is_main_process,
         )
 
         args = build_sft_config(
@@ -1020,6 +1058,15 @@ def train_sft(
             bf16=(precision == "bf16"),
             fp16=(precision == "fp16"),
             gradient_checkpointing=gradient_checkpointing,
+            gradient_checkpointing_kwargs=(
+                {"use_reentrant": False}
+                if gradient_checkpointing
+                else None
+            ),
+            ddp_find_unused_parameters=(
+                False if context.world_size > 1 else None
+            ),
+            log_on_each_node=False,
             logging_strategy="steps",
             logging_steps=logging_steps,
             logging_first_step=True,
@@ -1067,44 +1114,81 @@ def train_sft(
 
         final_model_dir = output_dir / "final-model"
         trainer.save_model(str(final_model_dir))
-        tokenizer.save_pretrained(final_model_dir)
-        _plot_history(trainer.state.log_history, output_dir)
+        trainer.accelerator.wait_for_everyone()
 
-        summary = {
-            "train_metrics": train_result.metrics,
-            "final_eval": final_eval,
-            "clipping": callback.clipping_summary(),
-            "gpu": _gpu_memory(),
-            "final_model": str(final_model_dir),
-        }
-        (output_dir / "train_summary.json").write_text(
-            json.dumps(summary, indent=2, ensure_ascii=False, default=str) + "\n",
-            encoding="utf-8",
-        )
+        if context.is_main_process:
+            tokenizer.save_pretrained(final_model_dir)
+            _plot_history(trainer.state.log_history, output_dir)
 
-        clipping = callback.clipping_summary()
-        print("\nSFT complete")
-        print(f"- final dev loss: {float(final_eval['eval_loss']):.4f}")
-        print(
-            "- logged grad points above clip threshold: "
-            f"{clipping['logged_points_above_clip']} / "
-            f"{clipping['logged_grad_points']}"
-        )
-        _print_gpu("GPU after training")
+            checkpoints = sorted(
+                (
+                    path.name
+                    for path in output_dir.glob("checkpoint-*")
+                    if path.is_dir()
+                ),
+                key=lambda name: int(name.rsplit("-", 1)[1]),
+            )
+            checkpoint_manifest = {
+                "checkpoints": checkpoints,
+                "final_model": str(final_model_dir),
+            }
+            (output_dir / "checkpoint_manifest.json").write_text(
+                json.dumps(
+                    checkpoint_manifest,
+                    indent=2,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
-        print("\nArtifacts")
-        for path in (
-            output_dir / "run_config.json",
-            output_dir / "train_log.jsonl",
-            output_dir / "loss_curve.png",
-            output_dir / "grad_norm_curve.png",
-            output_dir / "learning_rate_curve.png",
-            output_dir / "token_accuracy_curve.png",
-            output_dir / "train_summary.json",
-            final_model_dir,
-        ):
-            if path.exists():
-                print(f"- {path}")
+            summary = {
+                "train_metrics": train_result.metrics,
+                "final_eval": final_eval,
+                "clipping": callback.clipping_summary(),
+                "gpu": _gpu_memory(),
+                "world_size": context.world_size,
+                "global_effective_batch_size": effective_batch,
+                "checkpoints": checkpoints,
+                "final_model": str(final_model_dir),
+            }
+            (output_dir / "train_summary.json").write_text(
+                json.dumps(
+                    summary,
+                    indent=2,
+                    ensure_ascii=False,
+                    default=str,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            clipping = callback.clipping_summary()
+            print("\nSFT complete")
+            print(f"- final dev loss: {float(final_eval['eval_loss']):.4f}")
+            print(
+                "- logged grad points above clip threshold: "
+                f"{clipping['logged_points_above_clip']} / "
+                f"{clipping['logged_grad_points']}"
+            )
+            _print_gpu("GPU after training")
+
+            print("\nArtifacts")
+            for path in (
+                output_dir / "run_config.json",
+                output_dir / "train_log.jsonl",
+                output_dir / "loss_curve.png",
+                output_dir / "grad_norm_curve.png",
+                output_dir / "learning_rate_curve.png",
+                output_dir / "token_accuracy_curve.png",
+                output_dir / "checkpoint_manifest.json",
+                output_dir / "train_summary.json",
+                final_model_dir,
+            ):
+                if path.exists():
+                    print(f"- {path}")
+
+        trainer.accelerator.wait_for_everyone()
 
     except BaseException as exc:
         if _is_oom(exc):

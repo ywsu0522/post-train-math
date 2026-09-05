@@ -1,7 +1,7 @@
 from posttrain_math.answers import (
     classify_boxed_format,
     extract_last_boxed,
-    parse_boxed_answer
+    parse_boxed_answer,
 )
 
 

@@ -507,7 +507,21 @@ def build_parser() -> argparse.ArgumentParser:
     sft_parser.add_argument(
         "--gradient-accumulation",
         type=int,
-        default=8,
+        default=None,
+        help=(
+            "Explicit per-process accumulation. If omitted, "
+            "--global-batch-size is preserved across 1/2 GPUs."
+        ),
+    )
+
+    sft_parser.add_argument(
+        "--global-batch-size",
+        type=int,
+        default=16,
+        help=(
+            "Target global effective batch size. Used when "
+            "--gradient-accumulation is omitted."
+        ),
     )
 
     sft_parser.add_argument(
@@ -584,7 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     sft_parser.add_argument(
         "--save-total-limit",
         type=int,
-        default=2,
+        default=10,
     )
 
     sft_parser.add_argument(
@@ -829,6 +843,9 @@ def run_train(
             ),
             gradient_accumulation=(
                 args.gradient_accumulation
+            ),
+            global_batch_size=(
+                args.global_batch_size
             ),
             weight_decay=(
                 args.weight_decay

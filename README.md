@@ -10,9 +10,10 @@ The repository currently owns:
 - explicit model and dataset download commands;
 - deterministic train/dev/test preparation;
 - a one-batch overfit sanity check and LoRA/full-parameter SFT;
-- local-only Hugging Face evaluation with mathematical answer verification.
+- single-/multi-GPU Hugging Face evaluation with mathematical answer verification;
+- GRPO post-training from an SFT LoRA adapter using math-verify rewards.
 
-RL, quantization, and vLLM rollouts are future work. vLLM is intentionally kept in a separate environment so its CUDA/PyTorch wheel constraints cannot change the locked training environment.
+GRPO v1 uses Transformers generation in the locked training environment. Quantization and vLLM rollouts remain future work; vLLM stays in a separate environment so its CUDA/PyTorch wheel constraints cannot change the locked training environment.
 
 ## Naming and directories
 
@@ -100,6 +101,31 @@ uv run --locked posttrain-math data prepare
 uv run --locked posttrain-math environment
 ```
 
+## Single- and dual-GPU runtime
+
+The Python core is shared across Colab and Kaggle. `scripts/launch_gpu.sh`
+selects one process per GPU:
+
+```bash
+# Colab or a forced single-GPU run
+bash scripts/launch_gpu.sh 1 eval --split dev --prompt boxed --batch-size 2
+
+# Kaggle T4x2
+bash scripts/launch_gpu.sh 2 eval --split dev --prompt boxed --batch-size 2
+
+# Detect all visible GPUs
+bash scripts/launch_gpu.sh auto eval --split dev --prompt boxed --batch-size 2
+```
+
+Multi-GPU evaluation replicates the model once per GPU, shards the fixed
+evaluation cohort by row index, writes per-rank JSONL shards, and merges them
+on rank 0 into the same `predictions.jsonl` and `metrics.json` contract used by
+single-GPU evaluation.
+
+SFT uses Hugging Face Trainer/Accelerate DDP when launched with more than one
+process. The default target global batch is 16, so with per-device batch 2 the
+resolved gradient accumulation is 8 on one GPU and 4 on two GPUs.
+
 ## Training
 
 Start with the one-batch LoRA overfit check:
@@ -114,7 +140,7 @@ Then run LoRA SFT:
 
 ```bash
 uv run --locked posttrain-math train sft \
-  --output-dir runs/olmo-1b-lora-sft-v1 \
+  --output-dir runs/olmo2-1b-lora-sft-v1 \
   --peft lora \
   --precision auto \
   --gradient-checkpointing
@@ -158,6 +184,43 @@ uv run --locked posttrain-math eval \
   --model runs/my-experiment/final-model \
   --split dev \
   --prompt boxed
+```
+
+## GRPO post-training v1
+
+The first RL stage uses Group Relative Policy Optimization (GRPO) starting from
+an SFT LoRA adapter. The rollout reward uses the same locked `math-verify`
+contract as evaluation: a correct boxed answer receives `1.0`; an incorrect but
+parseable boxed answer receives a small configurable format reward (default
+`0.05`); all other outputs receive `0.0`.
+
+GRPO uses sampled rollouts (`num_generations=4` by default) while the benchmark
+evaluator remains deterministic greedy decoding. v1 uses `beta=0.0`, so no
+reference-model copy is required.
+
+Smoke test:
+
+```bash
+bash scripts/launch_grpo.sh 1 \
+  --model runs/olmo2-1b-lora-sft-v1/final-model \
+  --output-dir runs/olmo2-1b-grpo-smoke \
+  --limit-prompts 32 \
+  --max-steps 5
+```
+
+Kaggle T4x2 run:
+
+```bash
+bash scripts/launch_grpo.sh 2 \
+  --model runs/olmo2-1b-lora-sft-v1/final-model \
+  --output-dir runs/olmo2-1b-grpo-v1 \
+  --max-steps 100
+```
+
+Evaluate GRPO checkpoints with the same deterministic evaluator:
+
+```bash
+bash scripts/eval_checkpoints.sh 2 runs/olmo2-1b-grpo-v1
 ```
 
 ## Keeping Colab checkpoints
