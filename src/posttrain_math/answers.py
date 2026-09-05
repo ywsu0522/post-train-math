@@ -235,7 +235,12 @@ def extract_last_boxed(
 def parse_boxed_answer(
     answer: str | None,
 ):
-    if answer is None:
+    if not isinstance(answer, str):
+        return None
+
+    answer = answer.strip()
+
+    if not answer:
         return None
 
     wrapped = (

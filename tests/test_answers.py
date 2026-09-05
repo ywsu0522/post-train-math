@@ -1,6 +1,7 @@
 from posttrain_math.answers import (
     classify_boxed_format,
     extract_last_boxed,
+    parse_boxed_answer
 )
 
 
@@ -81,3 +82,10 @@ def test_no_boxed() -> None:
         )
         is None
     )
+
+
+def test_parse_boxed_answer_rejects_missing_values() -> None:
+    assert parse_boxed_answer(None) is None
+    assert parse_boxed_answer(float("nan")) is None
+    assert parse_boxed_answer("") is None
+    assert parse_boxed_answer("   ") is None
