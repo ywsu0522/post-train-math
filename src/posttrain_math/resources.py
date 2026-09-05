@@ -6,8 +6,8 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
 
-DEFAULT_MODEL_REPO = "allenai/OLMo-1B-0724-hf"
-DEFAULT_MODEL_DIR = Path("models/olmo-1b-0724-hf")
+DEFAULT_MODEL_REPO = "allenai/OLMo-2-0425-1B"
+DEFAULT_MODEL_DIR = Path("models/olmo-2-0425-1b")
 
 
 def download_model(

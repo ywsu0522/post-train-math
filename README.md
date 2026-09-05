@@ -1,6 +1,6 @@
 # posttrain-math
 
-Reproducible post-training experiments for mathematical language models. The current pipeline uses a local OLMo 1B base model and the Hendrycks MATH dataset to provide deterministic data preparation, completion-only LoRA SFT, and boxed-answer evaluation.
+Reproducible post-training experiments for mathematical language models. The current pipeline uses a local OLMo 2 1B base model and the Hendrycks MATH dataset to provide deterministic data preparation, completion-only LoRA SFT, and boxed-answer evaluation.
 
 ## Scope
 
@@ -77,7 +77,7 @@ The downloads are resumable/reusable when their manifests and expected files are
 The resulting local resources are:
 
 ```text
-allenai/OLMo-1B-0724-hf -> models/olmo-1b-0724-hf/
+allenai/OLMo-2-0425-1B -> models/olmo-2-0425-1b/
 EleutherAI/hendrycks_math -> data/raw/
                             -> data/processed/
 ```
