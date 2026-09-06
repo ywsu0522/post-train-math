@@ -47,4 +47,4 @@ for model in "${models[@]}"; do
     --output-dir "$output_root/$name"
 done
 
-uv run --locked python scripts/summarize_eval_runs.py "$output_root"
+uv run --locked --no-sync python scripts/summarize_eval_runs.py "$output_root"

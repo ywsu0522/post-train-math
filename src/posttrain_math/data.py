@@ -30,6 +30,7 @@ EXPECTED_RAW_TRAIN_ROWS = 7500
 EXPECTED_RAW_TEST_ROWS = 5000
 
 HENDRYCKS_MATH_REPO = "EleutherAI/hendrycks_math"
+HENDRYCKS_MATH_REVISION = "21a5633873b6a120296cce3e2df9d5550074f4a3"
 HENDRYCKS_MATH_CONFIGS = (
     "algebra",
     "counting_and_probability",
@@ -45,7 +46,7 @@ def download_raw_datasets(
     *,
     output_dir: Path,
     repo_id: str = HENDRYCKS_MATH_REPO,
-    revision: str = "main",
+    revision: str = HENDRYCKS_MATH_REVISION,
     force: bool = False,
 ) -> tuple[Path, Path]:
     """Materialize the Hugging Face MATH dataset into two local parquet files."""

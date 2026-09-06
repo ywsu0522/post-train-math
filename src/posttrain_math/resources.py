@@ -7,6 +7,9 @@ from pathlib import Path
 from huggingface_hub import HfApi, snapshot_download
 
 DEFAULT_MODEL_REPO = "allenai/OLMo-2-0425-1B"
+# Immutable upstream revision. `download_model` resolves this to the full SHA
+# again and records the result in source.json.
+DEFAULT_MODEL_REVISION = "13cece9360d59bb9db636273ea8d000b67fcc27b"
 DEFAULT_MODEL_DIR = Path("models/olmo-2-0425-1b")
 
 
@@ -14,7 +17,7 @@ def download_model(
     *,
     repo_id: str = DEFAULT_MODEL_REPO,
     output_dir: Path = DEFAULT_MODEL_DIR,
-    revision: str = "main",
+    revision: str = DEFAULT_MODEL_REVISION,
     force: bool = False,
 ) -> Path:
     """Download a Hub model once, then use the local directory everywhere else."""

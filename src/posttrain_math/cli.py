@@ -3,6 +3,7 @@ from pathlib import Path
 
 from posttrain_math.data import (
     HENDRYCKS_MATH_REPO,
+    HENDRYCKS_MATH_REVISION,
     download_raw_datasets,
     inspect_raw_datasets,
     prepare_datasets,
@@ -10,6 +11,7 @@ from posttrain_math.data import (
 from posttrain_math.environment import (
     inspect_environment,
     print_environment_report,
+    write_environment_manifest,
 )
 from posttrain_math.evaluation import (
     evaluate,
@@ -24,6 +26,7 @@ from posttrain_math.prompting import (
 from posttrain_math.resources import (
     DEFAULT_MODEL_DIR,
     DEFAULT_MODEL_REPO,
+    DEFAULT_MODEL_REVISION,
     download_model,
 )
 from posttrain_math.training import (
@@ -112,35 +115,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_download.add_argument(
         "--revision",
-        default="main",
+        default=DEFAULT_MODEL_REVISION,
     )
     model_download.add_argument(
         "--force",
         action="store_true",
     )
 
-    # environment
-    env_parser = commands.add_parser(
-        "environment",
-    )
-
-    env_parser.add_argument(
-        "--train-data",
-        type=Path,
-        default=DEFAULT_TRAIN_DATASET,
-    )
-
-    env_parser.add_argument(
-        "--test-data",
-        type=Path,
-        default=DEFAULT_TEST_DATASET,
-    )
-
-    env_parser.add_argument(
-        "--model",
-        type=Path,
-        default=DEFAULT_MODEL,
-    )
+    # hardware/runtime doctor; keep `environment` as a compatibility alias.
+    for environment_command in ("doctor", "environment"):
+        env_parser = commands.add_parser(environment_command)
+        env_parser.add_argument(
+            "--train-data",
+            type=Path,
+            default=DEFAULT_TRAIN_DATASET,
+        )
+        env_parser.add_argument(
+            "--test-data",
+            type=Path,
+            default=DEFAULT_TEST_DATASET,
+        )
+        env_parser.add_argument(
+            "--model",
+            type=Path,
+            default=DEFAULT_MODEL,
+        )
+        env_parser.add_argument(
+            "--output",
+            type=Path,
+            default=None,
+            help="Optional JSON path for a machine-readable environment report.",
+        )
 
     # data
     data_parser = commands.add_parser(
@@ -168,7 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     download_parser.add_argument(
         "--revision",
-        default="main",
+        default=HENDRYCKS_MATH_REVISION,
     )
     download_parser.add_argument(
         "--force",
@@ -658,6 +663,10 @@ def run_environment(
         model_path=args.model,
     )
 
+    if args.output is not None:
+        write_environment_manifest(report, args.output)
+        print(f"Environment JSON: {args.output}")
+
     return 0 if report.ok else 1
 
 
@@ -899,7 +908,7 @@ def main() -> None:
         if args.command == "model":
             exit_code = run_model(args)
 
-        elif args.command == "environment":
+        elif args.command in {"doctor", "environment"}:
             exit_code = (
                 run_environment(args)
             )

@@ -11,7 +11,7 @@ shift
 
 if [[ "$requested" == "auto" ]]; then
   requested="$(
-    uv run --locked python - <<'PY'
+    uv run --locked --no-sync python - <<'PY'
 import torch
 print(torch.cuda.device_count())
 PY
@@ -24,7 +24,7 @@ if ! [[ "$requested" =~ ^[0-9]+$ ]] || [[ "$requested" -lt 1 ]]; then
 fi
 
 visible="$(
-  uv run --locked python - <<'PY'
+  uv run --locked --no-sync python - <<'PY'
 import torch
 print(torch.cuda.device_count())
 PY
@@ -36,10 +36,10 @@ if [[ "$requested" -gt "$visible" ]]; then
 fi
 
 if [[ "$requested" -eq 1 ]]; then
-  exec uv run --locked python -m posttrain_math "$@"
+  exec uv run --locked --no-sync python -m posttrain_math "$@"
 fi
 
-exec uv run --locked torchrun \
+exec uv run --locked --no-sync torchrun \
   --standalone \
   --nproc_per_node="$requested" \
   --module posttrain_math \

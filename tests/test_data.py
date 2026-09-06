@@ -118,7 +118,7 @@ def test_download_raw_datasets_materializes_local_parquets(tmp_path, monkeypatch
     class FakeApi:
         def dataset_info(self, repo_id: str, revision: str):
             assert repo_id == "org/math"
-            assert revision == "main"
+            assert revision == data_module.HENDRYCKS_MATH_REVISION
             return FakeInfo()
 
     class FakeSplit:

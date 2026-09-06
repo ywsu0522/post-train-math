@@ -6,6 +6,7 @@ from posttrain_math import resources
 
 def test_default_model_is_olmo() -> None:
     assert resources.DEFAULT_MODEL_REPO == "allenai/OLMo-2-0425-1B"
+    assert resources.DEFAULT_MODEL_REVISION == "13cece9360d59bb9db636273ea8d000b67fcc27b"
     assert resources.DEFAULT_MODEL_DIR == Path("models/olmo-2-0425-1b")
 
 
@@ -16,7 +17,7 @@ def test_download_model_records_resolved_commit(tmp_path, monkeypatch) -> None:
     class FakeApi:
         def model_info(self, repo_id: str, revision: str):
             assert repo_id == "org/model"
-            assert revision == "main"
+            assert revision == resources.DEFAULT_MODEL_REVISION
             return FakeInfo()
 
     def fake_snapshot_download(*, repo_id, revision, local_dir):
