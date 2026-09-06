@@ -111,7 +111,11 @@ bash scripts/launch_gpu.sh auto train sft \
 ```
 
 SFT writes Trainer checkpoints plus `final-model/`, configuration, logs,
-summaries, and plots under the selected run directory.
+summaries, plots, and `provenance.json` under the selected run directory.
+For LoRA runs, retained adapter configs are normalized to the canonical
+Hugging Face base-model repo and exact revision, while
+`base_model_source.json` records how this project resolves the matching local
+snapshot without downloading during train/eval.
 
 ## Evaluation
 
@@ -130,6 +134,10 @@ mathematical equivalence with the locked `math-verify` version.
 ## GRPO
 
 GRPO remains a separate module and uses the same answer-verification contract.
+The launcher accepts a normalized/published SFT adapter, verifies that its
+canonical base model is already available locally, stages a temporary
+local-path adapter for training, and normalizes retained GRPO adapters again
+after the run.
 
 ```bash
 bash scripts/launch_grpo.sh auto \
@@ -146,9 +154,11 @@ bash scripts/eval_checkpoints.sh auto runs/olmo2-1b-grpo-v1
 
 ## Artifact contract
 
-Local generated artifacts belong under `runs/<experiment>/`. Keep source
-manifests, configuration, logs, metrics, checkpoints needed for resume, and the
-final model/adapter together.
+Local generated artifacts belong under `runs/<experiment>/`.
+Successful SFT and GRPO runs automatically create `provenance.json` containing
+the git commit/dirty state, `uv.lock` hash, model and dataset source manifests,
+processed-data manifest, and hardware/runtime report. Keep configuration, logs,
+metrics, checkpoints needed for resume, and the final model/adapter together.
 
 A local workstation keeps `runs/` on its normal filesystem. Hosted notebook
 filesystems are ephemeral, so persistence is handled by the notebook workflow,
@@ -179,3 +189,8 @@ needed for resume or for a specific analysis.
 Dependency maintenance uses `uv lock`. Installation uses
 `uv sync --locked`. Normal execution uses `uv run --locked --no-sync`, which
 keeps experiment execution from mutating the environment.
+
+GitHub Actions runs `uv lock --check`, Ruff, and the CPU-compatible unit test
+suite on pushes and pull requests. GPU execution remains a separate hardware
+validation step because hosted CI runners do not provide the reference NVIDIA
+runtime.

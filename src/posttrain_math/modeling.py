@@ -12,6 +12,7 @@ from transformers import (
     AutoTokenizer,
 )
 
+from posttrain_math.artifacts import resolve_local_base_model
 from posttrain_math.distributed import get_distributed_context
 from posttrain_math.environment import native_bf16_supported
 
@@ -113,12 +114,12 @@ class HFModelRunner:
                 model_path,
                 local_files_only=True,
             )
-            base_model_path = Path(peft_config.base_model_name_or_path)
-            if not base_model_path.is_dir():
-                raise FileNotFoundError(
-                    "LoRA adapter requires its local base model directory: "
-                    f"{base_model_path}"
-                )
+            base_model_path = resolve_local_base_model(
+                model_path,
+                str(
+                    peft_config.base_model_name_or_path
+                ),
+            )
 
             base_model = AutoModelForCausalLM.from_pretrained(
                 base_model_path,

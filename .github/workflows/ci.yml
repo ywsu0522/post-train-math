@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install uv and Python
+        uses: astral-sh/setup-uv@v10
+        with:
+          python-version: "3.12"
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Install locked development environment
+        run: uv sync --locked --group dev
+
+      - name: Lint
+        run: uv run --locked --no-sync ruff check src tests
+
+      - name: Unit tests
+        run: uv run --locked --no-sync pytest -q

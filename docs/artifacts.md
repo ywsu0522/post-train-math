@@ -28,15 +28,21 @@ runs/<experiment>/
 
 Keep together:
 
+- `provenance.json` (written automatically by successful SFT/GRPO entrypoints);
 - `run_config.json`;
 - training logs and plots;
 - `checkpoint-*` needed for resume;
 - `checkpoint_manifest.json`;
 - `train_summary.json`;
 - `final-model/`;
-- evaluation `predictions.jsonl` and `metrics.json`;
-- a saved `doctor` environment report when publishing a result;
-- the model `source.json` and data `download_manifest.json` used by the run.
+- evaluation `predictions.jsonl` and `metrics.json`.
+
+`provenance.json` snapshots the code commit/dirty state, `uv.lock` hash,
+model/base-model source identity, raw-data download manifest,
+processed-data manifest, and hardware/runtime report. LoRA adapter directories
+also contain `base_model_source.json`; their `adapter_config.json` records the
+canonical Hugging Face base repo and exact revision instead of a machine-local
+training pathname.
 
 ## Local workstation
 
@@ -61,13 +67,13 @@ This separation keeps provider-specific storage APIs out of the Python package.
 For a portfolio/reproducibility model release, publish:
 
 1. final LoRA adapter or final model;
-2. exact base model repo/revision;
-3. exact dataset repo/revision and split seed;
-4. git commit of this repository;
-5. dependency/lock identity;
-6. run config;
-7. environment report;
-8. evaluation metrics.
+2. `provenance.json`;
+3. `run_config.json` and `train_summary.json`;
+4. evaluation metrics;
+5. `base_model_source.json` for LoRA artifacts.
+
+The provenance file already includes the exact base-model and dataset source
+identity, split metadata, code revision, lock hash, and environment report.
 
 Intermediate checkpoints are usually operational artifacts. Publish them only
 when they are required to reproduce a learning-dynamics claim, resume a public

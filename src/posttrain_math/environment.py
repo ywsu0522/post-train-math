@@ -13,10 +13,21 @@ REFERENCE_MIN_DRIVER_MAJOR = 580
 REFERENCE_MIN_COMPUTE_CAPABILITY = (7, 5)
 
 
-def native_bf16_supported() -> bool:
-    return torch.cuda.is_available() and torch.cuda.is_bf16_supported(
-        including_emulation=False
-    )
+def native_bf16_supported(
+    device: int | torch.device | None = None,
+) -> bool:
+    if not torch.cuda.is_available():
+        return False
+
+    if device is None:
+        return torch.cuda.is_bf16_supported(
+            including_emulation=False
+        )
+
+    with torch.cuda.device(device):
+        return torch.cuda.is_bf16_supported(
+            including_emulation=False
+        )
 
 
 def _driver_version() -> str | None:
@@ -141,9 +152,11 @@ def inspect_environment(
                     name=torch.cuda.get_device_name(index),
                     compute_capability=f"{major}.{minor}",
                     total_vram_gib=props.total_memory / (1024**3),
-                    # Native BF16 starts with Ampere-class NVIDIA devices for
-                    # the GPU families supported by this project.
-                    bf16_supported=major >= 8,
+                    bf16_supported=(
+                        native_bf16_supported(
+                            index
+                        )
+                    ),
                     architecture_supported=(
                         (major, minor) >= REFERENCE_MIN_COMPUTE_CAPABILITY
                     ),

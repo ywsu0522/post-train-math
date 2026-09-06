@@ -36,11 +36,11 @@ if [[ "$requested" -gt "$visible" ]]; then
 fi
 
 if [[ "$requested" -eq 1 ]]; then
-  exec uv run --locked --no-sync python -m posttrain_math.rl "$@"
+  exec uv run --locked --no-sync python -m posttrain_math.grpo_entry "$@"
 fi
 
 exec uv run --locked --no-sync torchrun \
   --standalone \
   --nproc_per_node="$requested" \
-  --module posttrain_math.rl \
+  --module posttrain_math.grpo_entry \
   "$@"

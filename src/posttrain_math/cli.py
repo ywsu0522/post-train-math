@@ -1,6 +1,12 @@
 import argparse
 from pathlib import Path
 
+from posttrain_math.artifacts import (
+    is_main_process,
+    local_model_source,
+    normalize_adapter_run,
+    write_run_provenance,
+)
 from posttrain_math.data import (
     HENDRYCKS_MATH_REPO,
     HENDRYCKS_MATH_REVISION,
@@ -835,6 +841,21 @@ def run_train(
                 else 2e-5
             )
 
+        base_source = local_model_source(
+            args.model
+        )
+
+        if is_main_process():
+            write_run_provenance(
+                output_dir=output_dir,
+                algorithm="SFT",
+                model_path=args.model,
+                data_dir=args.data_dir,
+                base_model_source=(
+                    base_source
+                ),
+            )
+
         train_sft(
             model_path=args.model,
             data_dir=args.data_dir,
@@ -891,6 +912,15 @@ def run_train(
                 args.resume_from_checkpoint
             ),
         )
+
+        if (
+            is_main_process()
+            and args.peft == "lora"
+        ):
+            normalize_adapter_run(
+                output_dir,
+                base_source,
+            )
 
         return 0
 

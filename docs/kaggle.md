@@ -70,5 +70,7 @@ Never place the token in source files, notebook output, or git history.
 ## Cache policy
 
 The package uses the same pinned upstream revisions as local and Colab runs.
-`HF_HOME` may point to any persistent cache you provide. Cache placement is a
-notebook/deployment concern and does not change the training code.
+`HF_HOME` may point to a cache location you provide, but `posttrain-math model
+download` also materializes its explicit `--output-dir`; persist that directory
+separately if you want it across notebook versions/sessions. Cache and output
+placement are notebook/deployment concerns and do not change the training code.
