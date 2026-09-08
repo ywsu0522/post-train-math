@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +9,7 @@ import numpy as np
 import pandas as pd
 from tabulate import tabulate
 
-from posttrain_math.answers import extract_last_boxed, verify_boxed_answers
+from posttrain_math.answers import extract_final_boxed, parse_exact_rational
 from posttrain_math.distributed import (
     barrier,
     destroy_process_group_if_owned,
@@ -22,13 +23,11 @@ from posttrain_math.prompting import PromptFormatter
 def _normalize_optional_string(value: Any) -> str | None:
     if value is None:
         return None
-
     try:
         if pd.isna(value):
             return None
     except (TypeError, ValueError):
         pass
-
     value = str(value).strip()
     return value or None
 
@@ -48,7 +47,9 @@ def load_eval_split(data_dir: Path, split: str) -> pd.DataFrame:
         "type",
         "level",
         "gt_boxed",
-        "eval_eligible",
+        "gt_numerator",
+        "gt_denominator",
+        "rational_eligible",
     }
     missing = required - set(df.columns)
     if missing:
@@ -56,16 +57,12 @@ def load_eval_split(data_dir: Path, split: str) -> pd.DataFrame:
             "Evaluation data missing columns: "
             f"{sorted(missing)}. Re-run `posttrain-math data prepare`."
         )
-
     return df
 
 
 def _length_statistics(lengths: list[int]) -> dict[str, float | int]:
     values = np.asarray(lengths, dtype=np.int64)
-    return {
-        "median": float(np.median(values)),
-        "max": int(values.max()),
-    }
+    return {"median": float(np.median(values)), "max": int(values.max())}
 
 
 def _print_token_diagnostics(
@@ -76,7 +73,6 @@ def _print_token_diagnostics(
 ) -> dict[str, Any]:
     prompt_stats = _length_statistics(prompt_lengths)
     solution_stats = _length_statistics(solution_lengths)
-
     over_budget = sum(length > max_new_tokens for length in solution_lengths)
     ratio = over_budget / len(solution_lengths) if solution_lengths else 0.0
 
@@ -93,15 +89,11 @@ def _print_token_diagnostics(
         "  gold solution > max_new_tokens "
         f"({max_new_tokens}): {over_budget} ({100.0 * ratio:.2f}%)"
     )
-
     return {
         "prompt_tokens": prompt_stats,
         "gold_solution_tokens": solution_stats,
         "max_new_tokens": max_new_tokens,
-        "gold_solution_over_budget": {
-            "count": over_budget,
-            "ratio": ratio,
-        },
+        "gold_solution_over_budget": {"count": over_budget, "ratio": ratio},
     }
 
 
@@ -141,7 +133,6 @@ def _print_group_accuracy(
         ]
         for key, values in groups.items()
     ]
-
     print()
     print(title)
     print(
@@ -188,9 +179,8 @@ def _metrics_from_records(
     counters = {
         "num_examples": 0,
         "num_gt_boxed": 0,
-        "num_gt_parseable": 0,
         "num_pred_boxed": 0,
-        "num_pred_parseable": 0,
+        "num_pred_rational": 0,
         "num_correct": 0,
     }
     by_level: dict[str, dict[str, int]] = {}
@@ -199,37 +189,22 @@ def _metrics_from_records(
     for record in records:
         counters["num_examples"] += 1
         counters["num_gt_boxed"] += int(record["gt_boxed"] is not None)
-        counters["num_gt_parseable"] += int(bool(record["gold_parseable"]))
         counters["num_pred_boxed"] += int(record["pred_boxed"] is not None)
-        counters["num_pred_parseable"] += int(bool(record["prediction_parseable"]))
+        counters["num_pred_rational"] += int(bool(record["prediction_rational"]))
         counters["num_correct"] += int(bool(record["correct"]))
+        _update_group(by_level, str(record["level"]), correct=bool(record["correct"]))
+        _update_group(by_type, str(record["type"]), correct=bool(record["correct"]))
 
-        _update_group(
-            by_level,
-            str(record["level"]),
-            correct=bool(record["correct"]),
-        )
-        _update_group(
-            by_type,
-            str(record["type"]),
-            correct=bool(record["correct"]),
-        )
-
-    num_examples = counters["num_examples"]
-    accuracy = counters["num_correct"] / num_examples if num_examples else 0.0
-    boxed_output_rate = (
-        counters["num_pred_boxed"] / num_examples if num_examples else 0.0
-    )
-    parseable_output_rate = (
-        counters["num_pred_parseable"] / num_examples if num_examples else 0.0
-    )
-    gt_boxed_coverage = (
-        counters["num_gt_boxed"] / num_examples if num_examples else 0.0
-    )
+    n = counters["num_examples"]
+    accuracy = counters["num_correct"] / n if n else 0.0
+    boxed_output_rate = counters["num_pred_boxed"] / n if n else 0.0
+    rational_output_rate = counters["num_pred_rational"] / n if n else 0.0
+    gt_boxed_coverage = counters["num_gt_boxed"] / n if n else 0.0
 
     return {
         "split": split,
         "prompt_strategy": prompt_name,
+        "verifier": "exact-rational-v1",
         "generator": generator_metadata,
         "distributed": {
             "world_size": world_size,
@@ -240,14 +215,14 @@ def _metrics_from_records(
             "source_rows": source_rows,
             "eligible_rows": eligible_rows,
             "excluded_rows": excluded_rows,
-            "evaluated_rows": num_examples,
+            "evaluated_rows": n,
             "limit": limit,
         },
         "token_diagnostics": token_diagnostics,
         **counters,
         "gt_boxed_coverage": gt_boxed_coverage,
         "boxed_output_rate": boxed_output_rate,
-        "parseable_output_rate": parseable_output_rate,
+        "rational_output_rate": rational_output_rate,
         "accuracy": accuracy,
         "accuracy_by_level": _finalize_groups(by_level),
         "accuracy_by_type": _finalize_groups(by_type),
@@ -264,6 +239,7 @@ def _print_final_metrics(
     print()
     print("Evaluation")
     print(f"  split:                 {metrics['split']}")
+    print(f"  verifier:              {metrics['verifier']}")
     print(f"  prompt strategy:       {metrics['prompt_strategy']}")
     print(
         "  eligible cohort:       "
@@ -276,21 +252,10 @@ def _print_final_metrics(
     )
     print(f"  accuracy:              {metrics['accuracy']:.2%}")
     print(f"  boxed output rate:     {metrics['boxed_output_rate']:.2%}")
-    print(
-        "  parseable output rate: "
-        f"{metrics['parseable_output_rate']:.2%}"
-    )
+    print(f"  rational output rate:  {metrics['rational_output_rate']:.2%}")
     print(f"  inference world size:  {metrics['distributed']['world_size']}")
-
-    _print_group_accuracy(
-        "Accuracy by level",
-        metrics["accuracy_by_level"],
-    )
-    _print_group_accuracy(
-        "Accuracy by type",
-        metrics["accuracy_by_type"],
-    )
-
+    _print_group_accuracy("Accuracy by level", metrics["accuracy_by_level"])
+    _print_group_accuracy("Accuracy by type", metrics["accuracy_by_type"])
     print()
     print(f"  predictions: {predictions_path}")
     print(f"  metrics:     {metrics_path}")
@@ -316,13 +281,11 @@ def evaluate(
     try:
         source_df = load_eval_split(data_dir, split)
         source_rows = len(source_df)
-
-        eligible_df = source_df[source_df["eval_eligible"].astype(bool)].copy()
+        eligible_df = source_df[source_df["rational_eligible"].astype(bool)].copy()
         eligible_rows = len(eligible_df)
         excluded_rows = source_rows - eligible_rows
-
         if eligible_rows == 0:
-            raise ValueError(f"{split}: evaluation cohort is empty")
+            raise ValueError(f"{split}: exact-rational-v1 evaluation cohort is empty")
 
         if limit is not None:
             if limit <= 0:
@@ -334,48 +297,36 @@ def evaluate(
         df = df.reset_index(drop=True)
         df["eval_index"] = np.arange(len(df), dtype=np.int64)
         num_examples = len(df)
-
         output_dir.mkdir(parents=True, exist_ok=True)
         predictions_path = output_dir / "predictions.jsonl"
         metrics_path = output_dir / "metrics.json"
 
         token_diagnostics: dict[str, Any] = {}
         if context.is_main_process:
-            prompts = [
-                prompt_formatter(str(problem))
-                for problem in df["problem"]
-            ]
+            prompts = [prompt_formatter(str(problem)) for problem in df["problem"]]
             solutions = [str(solution) for solution in df["solution"]]
             token_diagnostics = _print_token_diagnostics(
                 prompt_lengths=generator.count_tokens(prompts),
                 solution_lengths=generator.count_tokens(solutions),
                 max_new_tokens=max_new_tokens,
             )
-
             print()
             print("Evaluation cohort")
+            print("  verifier:      exact-rational-v1")
             print(f"  source rows:   {source_rows}")
             print(f"  eligible rows: {eligible_rows}")
             print(f"  excluded rows: {excluded_rows}")
-            if limit is not None:
-                print(f"  evaluated rows: {num_examples} (--limit {limit})")
-            else:
-                print(f"  evaluated rows: {num_examples}")
+            print(f"  evaluated rows: {num_examples}")
             print(f"  inference processes: {context.world_size}")
             print()
 
         local_df = df.iloc[context.rank :: context.world_size].copy()
-        local_prompts = [
-            prompt_formatter(str(problem))
-            for problem in local_df["problem"]
-        ]
+        local_prompts = [prompt_formatter(str(problem)) for problem in local_df["problem"]]
 
         if context.is_distributed:
             shard_dir = output_dir / "shards"
             shard_dir.mkdir(parents=True, exist_ok=True)
-            local_predictions_path = (
-                shard_dir / f"predictions.rank{context.rank:03d}.jsonl"
-            )
+            local_predictions_path = shard_dir / f"predictions.rank{context.rank:03d}.jsonl"
         else:
             local_predictions_path = predictions_path
 
@@ -384,7 +335,6 @@ def evaluate(
             f"{num_examples} examples on {context.device}",
             flush=True,
         )
-
         generations = generator.iter_generate(
             local_prompts,
             max_new_tokens=max_new_tokens,
@@ -400,21 +350,13 @@ def evaluate(
                 strict=True,
             ):
                 gt_boxed = _normalize_optional_string(row["gt_boxed"])
-                pred_boxed = extract_last_boxed(generation)
+                numerator = int(row["gt_numerator"])
+                denominator = int(row["gt_denominator"])
+                gold = Fraction(numerator, denominator)
 
-                correct, gold_parseable, prediction_parseable = (
-                    verify_boxed_answers(
-                        gt_boxed,
-                        pred_boxed,
-                    )
-                )
-
-                if not gold_parseable:
-                    raise RuntimeError(
-                        "Prepared evaluation cohort contains a gold answer that is "
-                        "no longer parseable. Re-run `posttrain-math data prepare` "
-                        "and verify the locked math-verify version."
-                    )
+                pred_boxed = extract_final_boxed(generation)
+                prediction = parse_exact_rational(pred_boxed)
+                correct = prediction == gold
 
                 record = {
                     "eval_index": int(row["eval_index"]),
@@ -424,27 +366,25 @@ def evaluate(
                     "prompt_strategy": prompt_name,
                     "prompt": prompt,
                     "gt_boxed": gt_boxed,
+                    "gt_numerator": numerator,
+                    "gt_denominator": denominator,
                     "generation": generation,
                     "pred_boxed": pred_boxed,
-                    "gold_parseable": gold_parseable,
-                    "prediction_parseable": prediction_parseable,
+                    "prediction_rational": prediction is not None,
+                    "pred_numerator": prediction.numerator if prediction is not None else None,
+                    "pred_denominator": prediction.denominator if prediction is not None else None,
                     "correct": correct,
                 }
-
                 file.write(json.dumps(record, ensure_ascii=False) + "\n")
                 file.flush()
                 written += 1
 
                 status = "CORRECT" if correct else "INCORRECT"
-                gt_display = gt_boxed if gt_boxed is not None else "<none>"
-                pred_display = (
-                    pred_boxed if pred_boxed is not None else "<none>"
-                )
+                pred_display = pred_boxed if pred_boxed is not None else "<none>"
                 global_number = int(row["eval_index"]) + 1
                 print(
-                    f"[rank {context.rank}] "
-                    f"[{global_number}/{num_examples}] {status} | "
-                    f"gt={gt_display} | pred={pred_display}",
+                    f"[rank {context.rank}] [{global_number}/{num_examples}] {status} | "
+                    f"gt={numerator}/{denominator} | pred={pred_display}",
                     flush=True,
                 )
 
@@ -455,33 +395,23 @@ def evaluate(
             )
 
         barrier(context)
-
         metrics: dict[str, Any] = {}
-
         if context.is_main_process:
             if context.is_distributed:
                 records: list[dict[str, Any]] = []
                 shard_dir = output_dir / "shards"
                 for rank in range(context.world_size):
-                    shard_path = (
-                        shard_dir / f"predictions.rank{rank:03d}.jsonl"
-                    )
+                    shard_path = shard_dir / f"predictions.rank{rank:03d}.jsonl"
                     if not shard_path.is_file():
-                        raise RuntimeError(
-                            f"Missing evaluation shard: {shard_path}"
-                        )
+                        raise RuntimeError(f"Missing evaluation shard: {shard_path}")
                     records.extend(_read_jsonl(shard_path))
                 records.sort(key=lambda record: int(record["eval_index"]))
                 _write_jsonl(predictions_path, records)
             else:
                 records = _read_jsonl(predictions_path)
 
-            actual_indices = [
-                int(record["eval_index"])
-                for record in records
-            ]
-            expected_indices = list(range(num_examples))
-            if actual_indices != expected_indices:
+            actual_indices = [int(record["eval_index"]) for record in records]
+            if actual_indices != list(range(num_examples)):
                 raise RuntimeError(
                     "Merged evaluation shards have missing, duplicate, "
                     "or out-of-order eval_index values."
@@ -494,10 +424,7 @@ def evaluate(
                 split=split,
                 prompt_name=prompt_name,
                 generator_metadata=generator_metadata,
-                generation_config={
-                    "do_sample": False,
-                    "max_new_tokens": max_new_tokens,
-                },
+                generation_config={"do_sample": False, "max_new_tokens": max_new_tokens},
                 source_rows=source_rows,
                 eligible_rows=eligible_rows,
                 excluded_rows=excluded_rows,
@@ -510,7 +437,6 @@ def evaluate(
                     else None
                 ),
             )
-
             metrics_path.write_text(
                 json.dumps(metrics, indent=2, ensure_ascii=False) + "\n",
                 encoding="utf-8",
@@ -523,6 +449,5 @@ def evaluate(
 
         barrier(context)
         return metrics
-
     finally:
         destroy_process_group_if_owned(owns_process_group)

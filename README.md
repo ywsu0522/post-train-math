@@ -1,8 +1,15 @@
 # posttrain-math
 
 Reproducible post-training experiments for mathematical language models. The
-current pipeline uses OLMo 2 1B and Hendrycks MATH for deterministic data
-preparation, completion-only SFT, GRPO, and boxed-answer evaluation.
+reference pipeline uses OLMo 2 1B and Hendrycks MATH for deterministic data
+preparation, completion-only SFT, exact-rational evaluation, and RLVR.
+
+The central evaluation/reward contract is deliberately narrow: **exact-rational-v1**.
+Gold solutions are eligible only when they contain exactly one well-formed
+`\boxed{...}` whose content is an exact rational number. Model outputs are scored
+by the final `\boxed{...}` marker with a small deterministic parser based on
+Python `fractions.Fraction`. No symbolic or natural-language verifier participates
+in the primary RL reward.
 
 ## Reference environment
 
@@ -37,17 +44,23 @@ uv run --locked --no-sync posttrain-math doctor
 `doctor` checks the installed Torch CUDA build, NVIDIA driver, visible GPUs,
 compute capability, VRAM, BF16 support, and the presence of local model/data
 resources. Model/data absence is informational so the command is useful on a
-fresh clone.
-
-The legacy `posttrain-math environment` command remains as an alias.
+fresh clone. The legacy `posttrain-math environment` command remains as an alias.
 
 ## Pinned external resources
 
 Reference experiments do not follow mutable Hugging Face `main` branches.
 
-- model: `allenai/OLMo-2-0425-1B` at pinned revision `13cece9360d59bb9db636273ea8d000b67fcc27b`;
-- dataset: `EleutherAI/hendrycks_math` at
-  `21a5633873b6a120296cce3e2df9d5550074f4a3`.
+- model: `allenai/OLMo-2-0425-1B` at pinned revision
+  `13cece9360d59bb9db636273ea8d000b67fcc27b`;
+- dataset: the consolidated Hendrycks MATH mirror
+  `DigitalLearningGmbH/MATH-lighteval` at pinned revision
+  `f06834690385b29df31ccc717250746a3ba0322b`.
+
+The pinned dataset revision contains exactly two source Parquet files:
+`data/train-00000-of-00001.parquet` (7,500 rows) and
+`data/test-00000-of-00001.parquet` (5,000 rows). Each row already contains
+`problem`, `solution`, `type`, and `level`; the project does not download or
+reassemble seven per-subject configs.
 
 Download and prepare once:
 
@@ -57,13 +70,69 @@ uv run --locked --no-sync posttrain-math data download
 uv run --locked --no-sync posttrain-math data prepare
 ```
 
-Each download records the upstream resolved commit in a local manifest.
+Each download records the upstream resolved commit and file SHA256 values.
 `models/`, `data/`, and `runs/` remain gitignored.
 
-Pinning protects experiments from upstream drift. It cannot make an uncached
-remote service available during an outage. For resilient hosted runs, keep
-`HF_HOME` on persistent storage or prefetch before training. See
-[`docs/artifacts.md`](docs/artifacts.md).
+## exact-rational-v1 cohort
+
+`data prepare` retains the full rows used by SFT and adds deterministic cohort
+metadata:
+
+- `gt_boxed`
+- `gt_numerator`
+- `gt_denominator`
+- `rational_eligible`
+- `rational_exclusion`
+
+A gold row is eligible when its solution contains exactly one well-formed,
+non-empty `\boxed{...}` marker and the boxed content matches one of:
+
+```text
+42
+-17
+3/5
+-3/5
+\frac{3}{5}
+-\frac{3}{5}
+```
+
+Signed numerators/denominators are accepted and canonicalized with
+`fractions.Fraction`; denominator zero is rejected. Decimal, radical, symbolic,
+unit-bearing, tuple, interval, percentage, equation, and prose answers are out of
+domain by design.
+
+For the pinned 12,500-row source, the cohort audit is:
+
+| split | source rows | exact-rational-v1 | retention |
+| --- | ---: | ---: | ---: |
+| source train | 7,500 | 5,448 | 72.64% |
+| test | 5,000 | 3,592 | 71.84% |
+| combined | 12,500 | 9,040 | 72.32% |
+
+The processed manifest records exclusion counts and `type × level` source/cohort
+shares so selection drift is explicit. The regular train/dev split is still
+stratified on `type × level`; SFT can therefore continue to use the complete
+training split, while evaluation and RL select `rational_eligible == True`.
+
+## Verifier contract
+
+For a model completion, only the **final** `\boxed` marker is considered. If the
+final marker is malformed or its content is outside the exact-rational grammar,
+the prediction is invalid. The verifier never falls back to an earlier box, a
+last number in prose, a decimal approximation, or symbolic equivalence.
+
+Examples:
+
+```text
+gold = 1/2
+prediction = \boxed{2/4}       -> correct
+prediction = \boxed{0.5}       -> incorrect
+prediction = \boxed{\sqrt{1/4}} -> incorrect
+prediction = "answer is 1/2"   -> incorrect
+```
+
+The same parser is used for base OLMo, SFT checkpoints, RL checkpoints, offline
+evaluation, and RL rewards. Primary rewards are binary `{0, 1}`.
 
 ## Single- and multi-GPU execution
 
@@ -112,10 +181,6 @@ bash scripts/launch_gpu.sh auto train sft \
 
 SFT writes Trainer checkpoints plus `final-model/`, configuration, logs,
 summaries, plots, and `provenance.json` under the selected run directory.
-For LoRA runs, retained adapter configs are normalized to the canonical
-Hugging Face base-model repo and exact revision, while
-`base_model_source.json` records how this project resolves the matching local
-snapshot without downloading during train/eval.
 
 ## Evaluation
 
@@ -127,17 +192,27 @@ bash scripts/launch_gpu.sh auto eval \
   --output-dir runs/evals/olmo2-1b-lora-sft-v1
 ```
 
-Evaluation writes `predictions.jsonl` and `metrics.json`. The current benchmark
-metric requires a parseable final `\boxed{...}` answer and verifies its
-mathematical equivalence with the locked `math-verify` version.
+Evaluation automatically selects the fixed `exact-rational-v1` cohort and writes
+`predictions.jsonl` plus `metrics.json`. Metrics include accuracy, boxed-output
+rate, exact-rational-output rate, and accuracy by level/type.
 
-## GRPO
+## RLVR
 
-GRPO remains a separate module and uses the same answer-verification contract.
-The launcher accepts a normalized/published SFT adapter, verifies that its
-canonical base model is already available locally, stages a temporary
-local-path adapter for training, and normalizes retained GRPO adapters again
-after the run.
+The intended method progression is deliberately incremental:
+
+```text
+REINFORCE -> RLOO -> GRPO (original loss) -> Dr.GRPO -> selected DAPO components
+```
+
+The current implemented group-relative baseline is **GRPO with the original
+sequence-normalized GRPO loss**. The TRL configuration explicitly sets
+`loss_type="grpo"`, `num_iterations=1`, and `scale_rewards="group"` instead of
+inheriting TRL's current DAPO-style loss default.
+
+The baseline defaults to `beta=0` to avoid loading a reference model and to keep
+the comparison with subsequent RL methods memory-efficient. Therefore this is
+an algorithmic GRPO baseline, not a full reproduction of the original
+DeepSeekMath training recipe.
 
 ```bash
 bash scripts/launch_grpo.sh auto \
@@ -145,6 +220,11 @@ bash scripts/launch_grpo.sh auto \
   --output-dir runs/olmo2-1b-grpo-v1 \
   --max-steps 100
 ```
+
+`run_config.json` records the rollout budget, number of generations, prompt
+groups per update, verifier name, and explicit GRPO loss settings. REINFORCE and
+RLOO should be added as separate baseline implementations before introducing
+Dr.GRPO/DAPO mechanisms so changes in optimization can be attributed cleanly.
 
 Evaluate a sequence of checkpoints with:
 
@@ -154,24 +234,18 @@ bash scripts/eval_checkpoints.sh auto runs/olmo2-1b-grpo-v1
 
 ## Artifact contract
 
-Local generated artifacts belong under `runs/<experiment>/`.
-Successful SFT and GRPO runs automatically create `provenance.json` containing
-the git commit/dirty state, `uv.lock` hash, model and dataset source manifests,
-processed-data manifest, and hardware/runtime report. Keep configuration, logs,
-metrics, checkpoints needed for resume, and the final model/adapter together.
+Local generated artifacts belong under `runs/<experiment>/`. Successful SFT and
+GRPO runs create `provenance.json` containing the git commit/dirty state,
+`uv.lock` hash, model and dataset source manifests, processed-data manifest, and
+hardware/runtime report. Keep configuration, logs, metrics, checkpoints needed
+for resume, and the final model/adapter together.
 
 A local workstation keeps `runs/` on its normal filesystem. Hosted notebook
-filesystems are ephemeral, so persistence is handled by the notebook workflow,
-without Colab/Kaggle branches in the Python package:
+filesystems are ephemeral, so persistence is handled by the notebook workflow:
 
 - [Colab workflow](docs/colab.md)
 - [Kaggle workflow](docs/kaggle.md)
 - [Artifact and cache policy](docs/artifacts.md)
-
-For public reproducibility, publish the final adapter/model and the small
-configuration/metric manifests to a versioned model repository (for example,
-Hugging Face Hub). Preserve large intermediate checkpoints only when they are
-needed for resume or for a specific analysis.
 
 ## Repository directories
 
@@ -184,13 +258,10 @@ needed for resume or for a specific analysis.
 | `data/` | downloaded and derived dataset files | ignored |
 | `models/` | downloaded base-model snapshot | ignored |
 | `runs/` | training/evaluation artifacts | ignored |
-| `examples/reference_runs/` | small historical reference outputs | committed |
 
-Dependency maintenance uses `uv lock`. Installation uses
-`uv sync --locked`. Normal execution uses `uv run --locked --no-sync`, which
-keeps experiment execution from mutating the environment.
+Dependency maintenance uses `uv lock`. Installation uses `uv sync --locked`.
+Normal execution uses `uv run --locked --no-sync`, which keeps experiment
+execution from mutating the environment.
 
 GitHub Actions runs `uv lock --check`, Ruff, and the CPU-compatible unit test
-suite on pushes and pull requests. GPU execution remains a separate hardware
-validation step because hosted CI runners do not provide the reference NVIDIA
-runtime.
+suite on pushes to `master` and on pull requests.

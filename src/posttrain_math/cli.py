@@ -8,8 +8,8 @@ from posttrain_math.artifacts import (
     write_run_provenance,
 )
 from posttrain_math.data import (
-    HENDRYCKS_MATH_REPO,
-    HENDRYCKS_MATH_REVISION,
+    MATH_DATASET_REPO,
+    MATH_DATASET_REVISION,
     download_raw_datasets,
     inspect_raw_datasets,
     prepare_datasets,
@@ -170,7 +170,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     download_parser.add_argument(
         "--repo-id",
-        default=HENDRYCKS_MATH_REPO,
+        default=MATH_DATASET_REPO,
     )
     download_parser.add_argument(
         "--output-dir",
@@ -179,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     download_parser.add_argument(
         "--revision",
-        default=HENDRYCKS_MATH_REVISION,
+        default=MATH_DATASET_REVISION,
     )
     download_parser.add_argument(
         "--force",

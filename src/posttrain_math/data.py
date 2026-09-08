@@ -1,67 +1,170 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import random
+import shutil
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
-import datasets as hf_datasets
 import pandas as pd
-from huggingface_hub import HfApi
-from sklearn.model_selection import (
-    train_test_split,
-)
-from tabulate import tabulate
+from huggingface_hub import HfApi, hf_hub_download
+from sklearn.model_selection import train_test_split
 
-from posttrain_math.answers import (
-    classify_boxed_format,
-    extract_last_boxed,
-    parse_boxed_answer,
-)
+from posttrain_math.answers import RationalGold, classify_exact_rational_solution
 
-ORIGINAL_COLUMNS = [
-    "problem",
-    "solution",
-    "type",
-    "level",
+ORIGINAL_COLUMNS = ["problem", "solution", "type", "level"]
+COHORT_COLUMNS = [
+    "gt_boxed",
+    "gt_numerator",
+    "gt_denominator",
+    "rational_eligible",
+    "rational_exclusion",
 ]
 
 EXPECTED_RAW_TRAIN_ROWS = 7500
 EXPECTED_RAW_TEST_ROWS = 5000
+EXPECTED_EXACT_RATIONAL_TRAIN_ROWS = 5448
+EXPECTED_EXACT_RATIONAL_TEST_ROWS = 3592
 
-HENDRYCKS_MATH_REPO = "EleutherAI/hendrycks_math"
-HENDRYCKS_MATH_REVISION = "21a5633873b6a120296cce3e2df9d5550074f4a3"
-HENDRYCKS_MATH_CONFIGS = (
-    "algebra",
-    "counting_and_probability",
-    "geometry",
-    "intermediate_algebra",
-    "number_theory",
-    "prealgebra",
-    "precalculus",
-)
+MATH_DATASET_REPO = "DigitalLearningGmbH/MATH-lighteval"
+MATH_DATASET_REVISION = "f06834690385b29df31ccc717250746a3ba0322b"
+MATH_TRAIN_FILE = "data/train-00000-of-00001.parquet"
+MATH_TEST_FILE = "data/test-00000-of-00001.parquet"
+MATH_TRAIN_SHA256 = "eca6e667f4305dd5e5ba09b4fd55e7f3174a0fbe361cdfd4c44758b593a76933"
+MATH_TEST_SHA256 = "7dca8d6e41af88ecf82f2b5f36eb5530e083aaaa86ee325f62bd5c31535178c6"
+COHORT_NAME = "exact-rational-v1"
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _read_download_manifest(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Could not read raw dataset manifest: {path}"
+        ) from exc
+
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"Raw dataset manifest must contain a JSON object: {path}"
+        )
+    return value
+
+
+def _validate_existing_raw_dataset(
+    *,
+    train_path: Path,
+    test_path: Path,
+    manifest_path: Path,
+    repo_id: str,
+    revision: str,
+) -> None:
+    manifest = _read_download_manifest(manifest_path)
+    errors: list[str] = []
+
+    if manifest.get("repo_id") != repo_id:
+        errors.append(
+            "repo_id mismatch: "
+            f"{manifest.get('repo_id')!r} != {repo_id!r}"
+        )
+
+    if manifest.get("requested_revision") != revision:
+        errors.append(
+            "requested_revision mismatch: "
+            f"{manifest.get('requested_revision')!r} != {revision!r}"
+        )
+
+    expected_source_files = {
+        "train": MATH_TRAIN_FILE,
+        "test": MATH_TEST_FILE,
+    }
+    if manifest.get("source_files") != expected_source_files:
+        errors.append(
+            "source_files mismatch: "
+            f"{manifest.get('source_files')!r} != {expected_source_files!r}"
+        )
+
+    sha256_manifest = manifest.get("sha256")
+    if not isinstance(sha256_manifest, dict):
+        errors.append("manifest is missing sha256 metadata")
+        sha256_manifest = {}
+
+    actual_train_sha256 = _sha256(train_path)
+    actual_test_sha256 = _sha256(test_path)
+
+    manifest_train_sha256 = sha256_manifest.get("train")
+    manifest_test_sha256 = sha256_manifest.get("test")
+
+    if manifest_train_sha256 != actual_train_sha256:
+        errors.append(
+            "train SHA256 mismatch: "
+            f"{actual_train_sha256} != {manifest_train_sha256}"
+        )
+
+    if manifest_test_sha256 != actual_test_sha256:
+        errors.append(
+            "test SHA256 mismatch: "
+            f"{actual_test_sha256} != {manifest_test_sha256}"
+        )
+
+    if repo_id == MATH_DATASET_REPO and revision == MATH_DATASET_REVISION:
+        if actual_train_sha256 != MATH_TRAIN_SHA256:
+            errors.append(
+                "pinned train SHA256 mismatch: "
+                f"{actual_train_sha256} != {MATH_TRAIN_SHA256}"
+            )
+
+        if actual_test_sha256 != MATH_TEST_SHA256:
+            errors.append(
+                "pinned test SHA256 mismatch: "
+                f"{actual_test_sha256} != {MATH_TEST_SHA256}"
+            )
+
+    if errors:
+        details = "\n".join(f"- {error}" for error in errors)
+        raise RuntimeError(
+            "Existing raw MATH dataset does not match the requested source:\n"
+            f"{details}\n"
+            "Use --force to replace the local raw dataset."
+        )
 
 
 def download_raw_datasets(
     *,
     output_dir: Path,
-    repo_id: str = HENDRYCKS_MATH_REPO,
-    revision: str = HENDRYCKS_MATH_REVISION,
+    repo_id: str = MATH_DATASET_REPO,
+    revision: str = MATH_DATASET_REVISION,
     force: bool = False,
 ) -> tuple[Path, Path]:
-    """Materialize the Hugging Face MATH dataset into two local parquet files."""
+    """Materialize the consolidated MATH train/test Parquet files locally."""
     output_dir = Path(output_dir)
     train_path = output_dir / "math_train.parquet"
     test_path = output_dir / "math_test.parquet"
+    manifest_path = output_dir / "download_manifest.json"
 
-    existing = [path for path in (train_path, test_path) if path.exists()]
+    existing = [path for path in (train_path, test_path, manifest_path) if path.exists()]
+    complete = train_path.is_file() and test_path.is_file() and manifest_path.is_file()
+    if complete and not force:
+        _validate_existing_raw_dataset(
+            train_path=train_path,
+            test_path=test_path,
+            manifest_path=manifest_path,
+            repo_id=repo_id,
+            revision=revision,
+        )
+        print("Raw MATH dataset already present and verified; skipping download")
+        print(f"- train: {train_path}")
+        print(f"- test: {test_path}")
+        return train_path, test_path
     if existing and not force:
-        manifest_path = output_dir / "download_manifest.json"
-        if train_path.is_file() and test_path.is_file() and manifest_path.is_file():
-            print("Raw MATH dataset already present; skipping download")
-            print(f"- train: {train_path}")
-            print(f"- test: {test_path}")
-            return train_path, test_path
         raise FileExistsError(
             "Raw dataset is partially present: "
             + ", ".join(str(path) for path in existing)
@@ -72,26 +175,46 @@ def download_raw_datasets(
     info = HfApi().dataset_info(repo_id=repo_id, revision=revision)
     commit_sha = info.sha
     if not commit_sha:
-        raise RuntimeError(
-            f"Could not resolve a commit SHA for {repo_id}@{revision}"
-        )
+        raise RuntimeError(f"Could not resolve a commit SHA for {repo_id}@{revision}")
 
-    split_frames: dict[str, list[pd.DataFrame]] = {"train": [], "test": []}
-
-    for config_name in HENDRYCKS_MATH_CONFIGS:
-        dataset = hf_datasets.load_dataset(
-            repo_id,
-            config_name,
+    cached_train = Path(
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=MATH_TRAIN_FILE,
+            repo_type="dataset",
             revision=commit_sha,
         )
-        for split in ("train", "test"):
-            frame = dataset[split].to_pandas()
-            validate_required_columns(frame, f"{config_name}/{split}")
-            split_frames[split].append(frame[ORIGINAL_COLUMNS].copy())
+    )
+    cached_test = Path(
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=MATH_TEST_FILE,
+            repo_type="dataset",
+            revision=commit_sha,
+        )
+    )
 
-    train_df = pd.concat(split_frames["train"], ignore_index=True)
-    test_df = pd.concat(split_frames["test"], ignore_index=True)
+    shutil.copyfile(cached_train, train_path)
+    shutil.copyfile(cached_test, test_path)
 
+    train_sha256 = _sha256(train_path)
+    test_sha256 = _sha256(test_path)
+    if repo_id == MATH_DATASET_REPO and revision == MATH_DATASET_REVISION:
+        if train_sha256 != MATH_TRAIN_SHA256:
+            raise RuntimeError(
+                "Pinned train Parquet SHA256 mismatch: "
+                f"{train_sha256} != {MATH_TRAIN_SHA256}"
+            )
+        if test_sha256 != MATH_TEST_SHA256:
+            raise RuntimeError(
+                "Pinned test Parquet SHA256 mismatch: "
+                f"{test_sha256} != {MATH_TEST_SHA256}"
+            )
+
+    train_df = load_dataset(train_path)
+    test_df = load_dataset(test_path)
+    validate_required_columns(train_df, "Raw train")
+    validate_required_columns(test_df, "Raw test")
     if len(train_df) != EXPECTED_RAW_TRAIN_ROWS:
         raise RuntimeError(
             f"Unexpected raw train rows: {len(train_df)} "
@@ -103,20 +226,24 @@ def download_raw_datasets(
             f"(expected {EXPECTED_RAW_TEST_ROWS})"
         )
 
-    train_df.to_parquet(train_path, index=False)
-    test_df.to_parquet(test_path, index=False)
-
     manifest = {
         "repo_id": repo_id,
         "requested_revision": revision,
         "resolved_commit": commit_sha,
-        "configs": list(HENDRYCKS_MATH_CONFIGS),
+        "source_files": {
+            "train": MATH_TRAIN_FILE,
+            "test": MATH_TEST_FILE,
+        },
+        "sha256": {
+            "train": train_sha256,
+            "test": test_sha256,
+        },
         "train_rows": len(train_df),
         "test_rows": len(test_df),
         "train_path": str(train_path),
         "test_path": str(test_path),
     }
-    (output_dir / "download_manifest.json").write_text(
+    manifest_path.write_text(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
@@ -127,218 +254,88 @@ def download_raw_datasets(
     print(f"- commit: {commit_sha}")
     print(f"- train: {train_path} ({len(train_df)} rows)")
     print(f"- test: {test_path} ({len(test_df)} rows)")
-
     return train_path, test_path
 
 
-def load_dataset(
-    path: Path,
-) -> pd.DataFrame:
+def load_dataset(path: Path) -> pd.DataFrame:
+    path = Path(path)
     if not path.is_file():
-        raise FileNotFoundError(
-            f"Dataset not found: {path}"
-        )
-
+        raise FileNotFoundError(f"Dataset not found: {path}")
     return pd.read_parquet(path)
 
 
-def validate_required_columns(
-    df: pd.DataFrame,
-    name: str,
-) -> None:
-    missing = (
-        set(ORIGINAL_COLUMNS)
-        - set(df.columns)
-    )
-
+def validate_required_columns(df: pd.DataFrame, name: str) -> None:
+    missing = set(ORIGINAL_COLUMNS) - set(df.columns)
     if missing:
-        raise ValueError(
-            f"{name}: missing required "
-            f"columns: {sorted(missing)}"
-        )
+        raise ValueError(f"{name}: missing required columns: {sorted(missing)}")
 
 
-def _column_error_counts(
-    series: pd.Series,
-) -> dict[str, int]:
+def _column_error_counts(series: pd.Series) -> dict[str, int]:
     na_mask = series.isna()
-
-    non_null = (
-        series[~na_mask]
-        .astype(str)
-    )
-
-    empty_mask = (
-        non_null.eq("")
-    )
-
-    whitespace_mask = (
-        non_null.str.strip().eq("")
-        & ~empty_mask
-    )
-
+    non_null = series[~na_mask].astype(str)
+    empty_mask = non_null.eq("")
+    whitespace_mask = non_null.str.strip().eq("") & ~empty_mask
     return {
         "na": int(na_mask.sum()),
-        "empty": int(
-            empty_mask.sum()
-        ),
-        "whitespace_only": int(
-            whitespace_mask.sum()
-        ),
+        "empty": int(empty_mask.sum()),
+        "whitespace_only": int(whitespace_mask.sum()),
     }
 
 
-def _print_raw_dataset_report(
-    name: str,
-    df: pd.DataFrame,
-) -> None:
-    print(name)
-    print(f"  rows: {len(df)}")
-
-    duplicate_rows = int(
-        df.duplicated(
-            subset=ORIGINAL_COLUMNS,
-            keep="first",
-        ).sum()
-    )
-
-    print(
-        "  duplicated rows: "
-        f"{duplicate_rows}"
-    )
-
-    print("  error values:")
-
+def _assert_preparable(df: pd.DataFrame, name: str) -> None:
+    validate_required_columns(df, name)
     for column in ORIGINAL_COLUMNS:
-        counts = (
-            _column_error_counts(
-                df[column]
-            )
-        )
-
-        print(f"    {column}:")
-        print(
-            "      NA:              "
-            f"{counts['na']}"
-        )
-        print(
-            '      empty "":        '
-            f"{counts['empty']}"
-        )
-        print(
-            "      whitespace-only: "
-            f"{counts['whitespace_only']}"
-        )
-
-
-def inspect_raw_datasets(
-    train_path: Path,
-    test_path: Path,
-) -> None:
-    raw_train = load_dataset(
-        train_path
-    )
-
-    raw_test = load_dataset(
-        test_path
-    )
-
-    validate_required_columns(
-        raw_train,
-        "Raw train",
-    )
-
-    validate_required_columns(
-        raw_test,
-        "Raw test",
-    )
-
-    _print_raw_dataset_report(
-        "Raw train",
-        raw_train,
-    )
-
-    print()
-
-    _print_raw_dataset_report(
-        "Raw test",
-        raw_test,
-    )
-
-    train_problems = set(
-        raw_train["problem"]
-        .dropna()
-        .astype(str)
-    )
-
-    test_problems = set(
-        raw_test["problem"]
-        .dropna()
-        .astype(str)
-    )
-
-    overlap = (
-        train_problems
-        & test_problems
-    )
-
-    print()
-    print("Raw train/test")
-    print(
-        "  exact problem overlap: "
-        f"{len(overlap)} "
-        f"[{'PASS' if not overlap else 'FAIL'}]"
-    )
-
-
-def _assert_preparable(
-    df: pd.DataFrame,
-    name: str,
-) -> None:
-    validate_required_columns(
-        df,
-        name,
-    )
-
-    for column in ORIGINAL_COLUMNS:
-        counts = (
-            _column_error_counts(
-                df[column]
-            )
-        )
-
+        counts = _column_error_counts(df[column])
         if any(counts.values()):
-            raise ValueError(
-                f"{name}: invalid values "
-                f"in column '{column}': "
-                f"{counts}"
-            )
+            raise ValueError(f"{name}: invalid values in column '{column}': {counts}")
 
 
-def add_gt_boxed(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    result = df.copy()
+def inspect_raw_datasets(train_path: Path, test_path: Path) -> None:
+    raw_train = load_dataset(train_path)
+    raw_test = load_dataset(test_path)
+    _assert_preparable(raw_train, "Raw train")
+    _assert_preparable(raw_test, "Raw test")
 
-    result["gt_boxed"] = (
-        result["solution"]
-        .astype(str)
-        .map(extract_last_boxed)
+    for name, df in (("Raw train", raw_train), ("Raw test", raw_test)):
+        duplicate_rows = int(df.duplicated(subset=ORIGINAL_COLUMNS, keep="first").sum())
+        cohort = annotate_rational_cohort(df)
+        eligible = int(cohort["rational_eligible"].sum())
+        print(name)
+        print(f"  rows: {len(df)}")
+        print(f"  duplicated rows: {duplicate_rows}")
+        print(f"  {COHORT_NAME}: {eligible} ({eligible / len(df):.2%})")
+        print(f"  exclusions: {_exclusion_counts(cohort)}")
+        print()
+
+    overlap = set(raw_train["problem"].astype(str)) & set(raw_test["problem"].astype(str))
+    print("Raw train/test")
+    print(f"  exact problem overlap: {len(overlap)} [{'PASS' if not overlap else 'FAIL'}]")
+
+
+def _classification_columns(classification: RationalGold) -> tuple[Any, ...]:
+    return (
+        classification.gt_boxed,
+        classification.numerator,
+        classification.denominator,
+        classification.eligible,
+        classification.exclusion_reason,
     )
 
-    return result
 
-
-def add_eval_eligibility(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    if "gt_boxed" not in df.columns:
-        raise ValueError("gt_boxed must exist before evaluation eligibility is computed")
-
+def annotate_rational_cohort(df: pd.DataFrame) -> pd.DataFrame:
+    """Annotate rows with deterministic exact-rational-v1 gold metadata."""
     result = df.copy()
-    result["eval_eligible"] = result["gt_boxed"].map(
-        lambda answer: parse_boxed_answer(answer) is not None
-    )
+    classifications = [
+        classify_exact_rational_solution(str(solution))
+        for solution in result["solution"]
+    ]
+    columns = [_classification_columns(item) for item in classifications]
+
+    result["gt_boxed"] = [row[0] for row in columns]
+    result["gt_numerator"] = pd.array([row[1] for row in columns], dtype="Int64")
+    result["gt_denominator"] = pd.array([row[2] for row in columns], dtype="Int64")
+    result["rational_eligible"] = [bool(row[3]) for row in columns]
+    result["rational_exclusion"] = [row[4] for row in columns]
     return result
 
 
@@ -347,40 +344,18 @@ def split_raw_train(
     *,
     seed: int,
     dev_ratio: float,
-) -> tuple[
-    pd.DataFrame,
-    pd.DataFrame,
-]:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     if not 0.0 < dev_ratio < 1.0:
-        raise ValueError(
-            "dev_ratio must be "
-            "between 0 and 1"
-        )
-
-    strata = (
-        df["type"].astype(str)
-        + "||"
-        + df["level"].astype(str)
+        raise ValueError("dev_ratio must be between 0 and 1")
+    strata = df["type"].astype(str) + "||" + df["level"].astype(str)
+    train_df, dev_df = train_test_split(
+        df,
+        test_size=dev_ratio,
+        random_state=seed,
+        shuffle=True,
+        stratify=strata,
     )
-
-    train_df, dev_df = (
-        train_test_split(
-            df,
-            test_size=dev_ratio,
-            random_state=seed,
-            shuffle=True,
-            stratify=strata,
-        )
-    )
-
-    return (
-        train_df.reset_index(
-            drop=True
-        ),
-        dev_df.reset_index(
-            drop=True
-        ),
-    )
+    return train_df.reset_index(drop=True), dev_df.reset_index(drop=True)
 
 
 def _same_rows_unordered(
@@ -388,555 +363,66 @@ def _same_rows_unordered(
     right: pd.DataFrame,
     columns: list[str],
 ) -> bool:
-    left_hashes = (
-        pd.util.hash_pandas_object(
-            left[columns],
-            index=False,
+    left_hashes = pd.util.hash_pandas_object(left[columns], index=False).value_counts().sort_index()
+    right_hashes = pd.util.hash_pandas_object(right[columns], index=False).value_counts().sort_index()
+    return left_hashes.equals(right_hashes)
+
+
+def _exclusion_counts(df: pd.DataFrame) -> dict[str, int]:
+    values = df.loc[~df["rational_eligible"], "rational_exclusion"].dropna().astype(str)
+    return dict(sorted(Counter(values).items()))
+
+
+def _cohort_cell_stats(df: pd.DataFrame) -> dict[str, Any]:
+    source_counts = df.groupby(["type", "level"], dropna=False).size()
+    cohort_df = df[df["rational_eligible"]]
+    cohort_counts = cohort_df.groupby(["type", "level"], dropna=False).size()
+    source_total = len(df)
+    cohort_total = len(cohort_df)
+
+    cells: list[dict[str, Any]] = []
+    abs_drift_sum = 0.0
+    max_abs_drift = 0.0
+    for problem_type, level in sorted(source_counts.index, key=lambda key: (str(key[0]), str(key[1]))):
+        source_count = int(source_counts.loc[(problem_type, level)])
+        cohort_count = int(cohort_counts.get((problem_type, level), 0))
+        source_share = 100.0 * source_count / source_total if source_total else 0.0
+        cohort_share = 100.0 * cohort_count / cohort_total if cohort_total else 0.0
+        drift = cohort_share - source_share
+        abs_drift_sum += abs(drift)
+        max_abs_drift = max(max_abs_drift, abs(drift))
+        cells.append(
+            {
+                "type": str(problem_type),
+                "level": str(level),
+                "source_count": source_count,
+                "cohort_count": cohort_count,
+                "retention": cohort_count / source_count if source_count else 0.0,
+                "source_share_pct": source_share,
+                "cohort_share_pct": cohort_share,
+                "share_drift_pp": drift,
+            }
         )
-        .value_counts()
-        .sort_index()
-    )
-
-    right_hashes = (
-        pd.util.hash_pandas_object(
-            right[columns],
-            index=False,
-        )
-        .value_counts()
-        .sort_index()
-    )
-
-    return left_hashes.equals(
-        right_hashes
-    )
-
-
-def _joint_distribution(
-    df: pd.DataFrame,
-) -> dict[
-    tuple[str, str],
-    float,
-]:
-    counts = (
-        df.groupby(
-            [
-                "level",
-                "type",
-            ],
-            dropna=False,
-        )
-        .size()
-    )
-
-    total = len(df)
 
     return {
-        (
-            str(level),
-            str(problem_type),
-        ):
-        100.0 * int(count) / total
-        for (
-            level,
-            problem_type,
-        ), count
-        in counts.items()
+        "source_rows": source_total,
+        "cohort_rows": cohort_total,
+        "retention": cohort_total / source_total if source_total else 0.0,
+        "max_abs_share_drift_pp": max_abs_drift,
+        "total_variation_shift_pct": abs_drift_sum / 2.0,
+        "cells": cells,
     }
 
 
-def _max_distribution_gap(
-    reference: dict[
-        tuple[str, str],
-        float,
-    ],
-    target: dict[
-        tuple[str, str],
-        float,
-    ],
-) -> tuple[
-    tuple[str, str],
-    float,
-    float,
-    float,
-]:
-    keys = sorted(
-        set(reference)
-        | set(target)
-    )
-
-    if not keys:
-        raise ValueError(
-            "Distribution is empty"
-        )
-
-    best_key = keys[0]
-    best_reference = reference.get(
-        best_key,
-        0.0,
-    )
-    best_target = target.get(
-        best_key,
-        0.0,
-    )
-    best_gap = abs(
-        best_reference
-        - best_target
-    )
-
-    for key in keys[1:]:
-        reference_value = (
-            reference.get(key, 0.0)
-        )
-
-        target_value = (
-            target.get(key, 0.0)
-        )
-
-        gap = abs(
-            reference_value
-            - target_value
-        )
-
-        if gap > best_gap:
-            best_key = key
-            best_reference = (
-                reference_value
-            )
-            best_target = (
-                target_value
-            )
-            best_gap = gap
-
-    return (
-        best_key,
-        best_reference,
-        best_target,
-        best_gap,
-    )
-
-
-def print_type_level_distribution(
-    raw: pd.DataFrame,
-    train: pd.DataFrame,
-    dev: pd.DataFrame,
-) -> None:
-    raw_dist = (
-        _joint_distribution(raw)
-    )
-
-    train_dist = (
-        _joint_distribution(train)
-    )
-
-    dev_dist = (
-        _joint_distribution(dev)
-    )
-
-    preferred_levels = [
-        f"Level {index}"
-        for index in range(1, 6)
-    ]
-
-    observed_levels = {
-        str(value)
-        for value
-        in raw["level"].unique()
-    }
-
-    levels = [
-        level
-        for level in preferred_levels
-        if level in observed_levels
-    ]
-
-    levels.extend(
-        sorted(
-            observed_levels
-            - set(preferred_levels)
-        )
-    )
-
-    problem_types = sorted(
-        {
-            str(value)
-            for value
-            in raw["type"].unique()
-        }
-    )
-
-    headers = [
-        "Type",
-        *levels,
-    ]
-
-    table_rows: list[
-        list[str]
-    ] = []
-
-    for problem_type in problem_types:
-        row = [problem_type]
-
-        for level in levels:
-            percentage = (
-                raw_dist.get(
-                    (
-                        level,
-                        problem_type,
-                    ),
-                    0.0,
-                )
-            )
-
-            row.append(
-                f"{percentage:.2f}%"
-            )
-
-        table_rows.append(row)
-
-    print(
-        "Type × Level distribution "
-        "— raw train"
-    )
-    print()
-
-    print(
-        tabulate(
-            table_rows,
-            headers=headers,
-            tablefmt="rounded_grid",
-            stralign="center",
-            disable_numparse=True,
-        )
-    )
-
-    (
-        train_key,
-        raw_train_pct,
-        train_pct,
-        train_gap,
-    ) = _max_distribution_gap(
-        raw_dist,
-        train_dist,
-    )
-
-    (
-        dev_key,
-        raw_dev_pct,
-        dev_pct,
-        dev_gap,
-    ) = _max_distribution_gap(
-        raw_dist,
-        dev_dist,
-    )
-
-    train_level, train_type = (
-        train_key
-    )
-
-    dev_level, dev_type = (
-        dev_key
-    )
-
-    print()
-    print(
-        "- Largest raw/train gap: "
-        f"{train_type} × {train_level} "
-        f"= {train_gap:.2f} percentage points "
-        f"(raw {raw_train_pct:.2f}%, "
-        f"train {train_pct:.2f}%)"
-    )
-
-    print(
-        "- Largest raw/dev gap: "
-        f"{dev_type} × {dev_level} "
-        f"= {dev_gap:.2f} percentage points "
-        f"(raw {raw_dev_pct:.2f}%, "
-        f"dev {dev_pct:.2f}%)"
-    )
-
-
-def _boxed_audit_counts(
-    df: pd.DataFrame,
-) -> tuple[
-    dict[str, int],
-    dict[str, list[int]],
-]:
-    categories = {
-        "single_valid": 0,
-        "multiple_valid": 0,
-        "empty_boxed": 0,
-        "malformed_unbraced": 0,
-        "other_malformed": 0,
-        "no_boxed": 0,
-    }
-
-    indices = {
-        category: []
-        for category
-        in categories
-    }
-
-    for index, solution in enumerate(
-        df["solution"].astype(str)
-    ):
-        category = (
-            classify_boxed_format(
-                solution
-            )
-        )
-
-        categories[category] += 1
-
-        indices[category].append(
-            index
-        )
-
-    return (
-        categories,
-        indices,
-    )
-
-
-def _format_count(
-    count: int,
-    total: int,
-) -> str:
-    ratio = (
-        100.0 * count / total
-        if total
-        else 0.0
-    )
-
-    return (
-        f"{count} ({ratio:.2f}%)"
-    )
-
-
-def _one_line(
-    text: str,
-) -> str:
-    """
-    Collapse embedded whitespace/newlines
-    for stable one-line CLI output.
-    """
-    return " ".join(
-        text.split()
-    )
-
-
-def print_raw_boxed_audit(
-    name: str,
-    df: pd.DataFrame,
-    *,
-    seed: int,
-) -> None:
-    counts, indices = (
-        _boxed_audit_counts(df)
-    )
-
-    labels = {
-        "single_valid":
-            r"single valid \boxed{...}",
-        "multiple_valid":
-            r"multiple valid \boxed{...}",
-        "empty_boxed":
-            r"empty \boxed{}",
-        "malformed_unbraced":
-            r"malformed \boxed ANSWER",
-        "other_malformed":
-            "other malformed boxed",
-        "no_boxed":
-            "no boxed",
-    }
-
-    total = len(df)
-
-    rng = random.Random(seed)
-
-    sample_categories = {
-        "empty_boxed",
-        "malformed_unbraced",
-        "other_malformed",
-    }
-
-    print(
-        f"GT boxed format audit — {name}"
-    )
-
-    for (
-        category,
-        label,
-    ) in labels.items():
-        count = counts[category]
-
-        line = (
-            f"- {label}: "
-            f"{_format_count(count, total)}"
-        )
-
-        if (
-            count > 0
-            and category
-            in sample_categories
-        ):
-            sample_index = (
-                rng.choice(
-                    indices[category]
-                )
-            )
-
-            solution = _one_line(
-                str(
-                    df.iloc[
-                        sample_index
-                    ]["solution"]
-                )
-            )
-
-            line += (
-                f' | [{sample_index}] '
-                f'"{solution}"'
-            )
-
-        print(line)
-
-
-def print_processed_boxed_report(
-    name: str,
-    df: pd.DataFrame,
-) -> None:
-    valid = int(
-        df["gt_boxed"]
-        .notna()
-        .sum()
-    )
-
-    missing = (
-        len(df) - valid
-    )
-
-    print(
-        f"GT boxed extraction — {name}"
-    )
-
-    print(
-        "- valid gt_boxed: "
-        f"{_format_count(valid, len(df))}"
-    )
-
-    print(
-        "- missing gt_boxed: "
-        f"{_format_count(missing, len(df))}"
-    )
-
-    if "eval_eligible" in df.columns:
-        eligible = int(df["eval_eligible"].astype(bool).sum())
-        excluded = len(df) - eligible
-        print(
-            "- eval eligible: "
-            f"{_format_count(eligible, len(df))}"
-        )
-        print(
-            "- eval excluded: "
-            f"{_format_count(excluded, len(df))}"
-        )
-
-
-def _processed_invariants(
-    raw_train: pd.DataFrame,
-    raw_test: pd.DataFrame,
-    train: pd.DataFrame,
-    dev: pd.DataFrame,
-    test: pd.DataFrame,
-) -> dict[str, bool]:
-    train_problems = set(
-        train["problem"].astype(str)
-    )
-
-    dev_problems = set(
-        dev["problem"].astype(str)
-    )
-
-    recovered = pd.concat(
-        [
-            train,
-            dev,
-        ],
-        ignore_index=True,
-    )
-
-    raw_train_columns = list(
-        raw_train.columns
-    )
-
-    raw_test_columns = list(
-        raw_test.columns
-    )
-
-    test_schema_ok = (
-        list(test.columns)
-        == [
-            *raw_test_columns,
-            "gt_boxed",
-            "eval_eligible",
-        ]
-    )
-
-    test_values_ok = (
-        test[raw_test_columns]
-        .reset_index(drop=True)
-        .equals(
-            raw_test[
-                raw_test_columns
-            ]
-            .reset_index(drop=True)
-        )
-    )
-
+def _cohort_summary(df: pd.DataFrame) -> dict[str, Any]:
+    eligible = int(df["rational_eligible"].sum())
     return {
-        "train_dev_disjoint":
-            not (
-                train_problems
-                & dev_problems
-            ),
-
-        "recover_raw_train":
-            _same_rows_unordered(
-                recovered,
-                raw_train,
-                columns=(
-                    raw_train_columns
-                ),
-            ),
-
-        "gt_boxed_exists":
-            all(
-                "gt_boxed"
-                in frame.columns
-                for frame
-                in (
-                    train,
-                    dev,
-                    test,
-                )
-            ),
-
-        "eval_eligibility_exists":
-            all(
-                "eval_eligible"
-                in frame.columns
-                for frame
-                in (
-                    dev,
-                    test,
-                )
-            ),
-
-        "raw_test_preserved":
-            (
-                test_schema_ok
-                and test_values_ok
-            ),
+        "source_rows": len(df),
+        "eligible_rows": eligible,
+        "excluded_rows": len(df) - eligible,
+        "retention": eligible / len(df) if len(df) else 0.0,
+        "exclusion_counts": _exclusion_counts(df),
+        "type_level": _cohort_cell_stats(df),
     }
 
 
@@ -948,289 +434,129 @@ def prepare_datasets(
     seed: int,
     dev_ratio: float,
 ) -> None:
-    raw_train = load_dataset(
-        train_path
-    )
+    raw_train = load_dataset(train_path)
+    raw_test = load_dataset(test_path)
+    _assert_preparable(raw_train, "Raw train")
+    _assert_preparable(raw_test, "Raw test")
 
-    raw_test = load_dataset(
-        test_path
-    )
-
-    _assert_preparable(
-        raw_train,
-        "Raw train",
-    )
-
-    _assert_preparable(
-        raw_test,
-        "Raw test",
-    )
-
-    if (
-        len(raw_train)
-        != EXPECTED_RAW_TRAIN_ROWS
-    ):
+    if len(raw_train) != EXPECTED_RAW_TRAIN_ROWS:
         raise ValueError(
-            "Raw train row count is "
-            f"{len(raw_train)}, expected "
-            f"{EXPECTED_RAW_TRAIN_ROWS}"
+            f"Raw train row count is {len(raw_train)}, expected {EXPECTED_RAW_TRAIN_ROWS}"
         )
-
-    if (
-        len(raw_test)
-        != EXPECTED_RAW_TEST_ROWS
-    ):
+    if len(raw_test) != EXPECTED_RAW_TEST_ROWS:
         raise ValueError(
-            "Raw test row count is "
-            f"{len(raw_test)}, expected "
-            f"{EXPECTED_RAW_TEST_ROWS}"
+            f"Raw test row count is {len(raw_test)}, expected {EXPECTED_RAW_TEST_ROWS}"
         )
 
-    overlap = (
-        set(
-            raw_train[
-                "problem"
-            ].astype(str)
-        )
-        & set(
-            raw_test[
-                "problem"
-            ].astype(str)
-        )
-    )
-
+    overlap = set(raw_train["problem"].astype(str)) & set(raw_test["problem"].astype(str))
     if overlap:
-        raise ValueError(
-            "Raw train/test problem "
-            f"overlap detected: "
-            f"{len(overlap)}"
-        )
+        raise ValueError(f"Raw train/test problem overlap detected: {len(overlap)}")
 
-    print_raw_boxed_audit(
-        "raw train",
-        raw_train,
+    annotated_train = annotate_rational_cohort(raw_train)
+    annotated_test = annotate_rational_cohort(raw_test).reset_index(drop=True)
+
+    canonical_source = (
+        len(raw_train) == 7500
+        and len(raw_test) == 5000
+    )
+    if canonical_source:
+        train_cohort_rows = int(annotated_train["rational_eligible"].sum())
+        test_cohort_rows = int(annotated_test["rational_eligible"].sum())
+        if train_cohort_rows != EXPECTED_EXACT_RATIONAL_TRAIN_ROWS:
+            raise RuntimeError(
+                f"{COHORT_NAME} train count drift: {train_cohort_rows} "
+                f"!= {EXPECTED_EXACT_RATIONAL_TRAIN_ROWS}"
+            )
+        if test_cohort_rows != EXPECTED_EXACT_RATIONAL_TEST_ROWS:
+            raise RuntimeError(
+                f"{COHORT_NAME} test count drift: {test_cohort_rows} "
+                f"!= {EXPECTED_EXACT_RATIONAL_TEST_ROWS}"
+            )
+
+    train_df, dev_df = split_raw_train(
+        annotated_train,
         seed=seed,
+        dev_ratio=dev_ratio,
     )
+    test_df = annotated_test
 
-    print()
+    annotated_columns = [*ORIGINAL_COLUMNS, *COHORT_COLUMNS]
+    recovered = pd.concat([train_df, dev_df], ignore_index=True)
+    invariants = {
+        "train_dev_disjoint": set(train_df["problem"]).isdisjoint(set(dev_df["problem"])),
+        "recover_annotated_raw_train": _same_rows_unordered(
+            recovered,
+            annotated_train,
+            annotated_columns,
+        ),
+        "raw_test_preserved": test_df[ORIGINAL_COLUMNS].equals(
+            raw_test[ORIGINAL_COLUMNS].reset_index(drop=True)
+        ),
+        "cohort_metadata_exists": all(
+            set(COHORT_COLUMNS).issubset(frame.columns)
+            for frame in (train_df, dev_df, test_df)
+        ),
+    }
+    if not all(invariants.values()):
+        failed = [name for name, passed in invariants.items() if not passed]
+        raise RuntimeError(f"Processed invariant failure: {failed}")
 
-    print_raw_boxed_audit(
-        "raw test",
-        raw_test,
-        seed=seed,
-    )
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    train_path_out = output_dir / "train.parquet"
+    dev_path_out = output_dir / "dev.parquet"
+    test_path_out = output_dir / "test.parquet"
+    manifest_path = output_dir / "manifest.json"
 
-    processed_train_pool = (
-        add_gt_boxed(raw_train)
-    )
+    train_df.to_parquet(train_path_out, index=False)
+    dev_df.to_parquet(dev_path_out, index=False)
+    test_df.to_parquet(test_path_out, index=False)
 
-    processed_test = (
-        add_gt_boxed(raw_test)
-    )
-
-    train_df, dev_df = (
-        split_raw_train(
-            processed_train_pool,
-            seed=seed,
-            dev_ratio=dev_ratio,
-        )
-    )
-
-    dev_df = add_eval_eligibility(
-        dev_df
-    )
-
-    test_df = add_eval_eligibility(
-        processed_test
-        .reset_index(drop=True)
-    )
-
-    output_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    train_path_out = (
-        output_dir
-        / "train.parquet"
-    )
-
-    dev_path_out = (
-        output_dir
-        / "dev.parquet"
-    )
-
-    test_path_out = (
-        output_dir
-        / "test.parquet"
-    )
-
-    manifest_path = (
-        output_dir
-        / "manifest.json"
-    )
-
-    train_df.to_parquet(
-        train_path_out,
-        index=False,
-    )
-
-    dev_df.to_parquet(
-        dev_path_out,
-        index=False,
-    )
-
-    test_df.to_parquet(
-        test_path_out,
-        index=False,
-    )
-
-    invariants = (
-        _processed_invariants(
-            raw_train,
-            raw_test,
-            train_df,
-            dev_df,
-            test_df,
-        )
-    )
-
-    if not all(
-        invariants.values()
-    ):
-        failed = [
-            name
-            for name, passed
-            in invariants.items()
-            if not passed
-        ]
-
-        raise RuntimeError(
-            "Processed invariant failure: "
-            f"{failed}"
-        )
-
-    print()
-    print("Rows")
-    print(
-        f"- raw train: {len(raw_train)}"
-    )
-    print(
-        f"- train:     {len(train_df)}"
-    )
-    print(
-        f"- dev:       {len(dev_df)}"
-    )
-    print(
-        f"- raw test:  {len(raw_test)}"
-    )
-    print(
-        f"- test:      {len(test_df)}"
-    )
-
-    print()
-    print("Processed invariants")
-    print(
-        "- train/dev disjoint: [PASS]"
-    )
-    print(
-        "- train + dev recover "
-        "raw train: [PASS]"
-    )
-    print(
-        "- gt_boxed exists in "
-        "train/dev/test: [PASS]"
-    )
-    print(
-        "- eval eligibility exists in "
-        "dev/test: [PASS]"
-    )
-    print(
-        "- raw test == processed test "
-        "except evaluation metadata: [PASS]"
-    )
-
-    print()
-
-    print_type_level_distribution(
-        processed_train_pool,
-        train_df,
-        dev_df,
-    )
-
-    print()
-
-    print_processed_boxed_report(
-        "train",
-        train_df,
-    )
-
-    print()
-
-    print_processed_boxed_report(
-        "dev",
-        dev_df,
-    )
-
-    print()
-
-    print_processed_boxed_report(
-        "test",
-        test_df,
-    )
-
+    cohort_manifest = {
+        "name": COHORT_NAME,
+        "definition": (
+            "gold solution contains exactly one well-formed non-empty \\boxed{...}; "
+            "boxed content is a signed integer, a/b, or \\frac{a}{b}; denominator != 0; "
+            "canonicalized with fractions.Fraction"
+        ),
+        "source_train": _cohort_summary(annotated_train),
+        "train": _cohort_summary(train_df),
+        "dev": _cohort_summary(dev_df),
+        "test": _cohort_summary(test_df),
+    }
     manifest: dict[str, Any] = {
         "raw": {
-            "train_rows":
-                len(raw_train),
-            "test_rows":
-                len(raw_test),
+            "train_rows": len(raw_train),
+            "test_rows": len(raw_test),
         },
         "split": {
             "seed": seed,
-            "dev_ratio":
-                dev_ratio,
-            "stratify": [
-                "type",
-                "level",
-            ],
+            "dev_ratio": dev_ratio,
+            "stratify": ["type", "level"],
         },
         "processed": {
-            "train_rows":
-                len(train_df),
-            "dev_rows":
-                len(dev_df),
-            "test_rows":
-                len(test_df),
+            "train_rows": len(train_df),
+            "dev_rows": len(dev_df),
+            "test_rows": len(test_df),
         },
-        "evaluation_cohort": {
-            "definition":
-                "gt_boxed parseable by locked math-verify",
-            "dev_eligible_rows":
-                int(dev_df["eval_eligible"].astype(bool).sum()),
-            "dev_excluded_rows":
-                int((~dev_df["eval_eligible"].astype(bool)).sum()),
-            "test_eligible_rows":
-                int(test_df["eval_eligible"].astype(bool).sum()),
-            "test_excluded_rows":
-                int((~test_df["eval_eligible"].astype(bool)).sum()),
-        },
-        "invariants":
-            invariants,
+        "cohort": cohort_manifest,
+        "invariants": invariants,
     }
-
     manifest_path.write_text(
-        json.dumps(
-            manifest,
-            indent=2,
-        )
-        + "\n",
+        json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
 
-    print()
-    print("Artifacts")
-    print(f"- {train_path_out}")
-    print(f"- {dev_path_out}")
-    print(f"- {test_path_out}")
-    print(f"- {manifest_path}")
+    print("Processed MATH data")
+    print(f"- train: {train_path_out} ({len(train_df)} rows)")
+    print(f"- dev:   {dev_path_out} ({len(dev_df)} rows)")
+    print(f"- test:  {test_path_out} ({len(test_df)} rows)")
+    for name, frame in (
+        ("source train", annotated_train),
+        ("train", train_df),
+        ("dev", dev_df),
+        ("test", test_df),
+    ):
+        eligible = int(frame["rational_eligible"].sum())
+        print(f"- {COHORT_NAME} {name}: {eligible}/{len(frame)} ({eligible / len(frame):.2%})")
+    print(f"- manifest: {manifest_path}")

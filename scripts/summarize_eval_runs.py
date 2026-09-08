@@ -29,9 +29,13 @@ def main() -> None:
 
     rows = []
     detailed = {}
-
     for metrics_path in root.glob("*/metrics.json"):
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        if metrics.get("verifier") != "exact-rational-v1":
+            raise SystemExit(
+                f"Unsupported or legacy verifier in {metrics_path}: "
+                f"{metrics.get('verifier')!r}"
+            )
         name = metrics_path.parent.name
         rows.append(
             {
@@ -40,13 +44,12 @@ def main() -> None:
                 "n": metrics["num_examples"],
                 "accuracy": metrics["accuracy"],
                 "boxed_output_rate": metrics["boxed_output_rate"],
-                "parseable_output_rate": metrics["parseable_output_rate"],
+                "rational_output_rate": metrics["rational_output_rate"],
             }
         )
         detailed[name] = metrics
 
     rows.sort(key=lambda row: sort_key(str(row["model"])))
-
     if not rows:
         raise SystemExit(f"No */metrics.json files found under {root}")
 
@@ -60,7 +63,7 @@ def main() -> None:
                 "n",
                 "accuracy",
                 "boxed_output_rate",
-                "parseable_output_rate",
+                "rational_output_rate",
             ],
         )
         writer.writeheader()
@@ -70,11 +73,9 @@ def main() -> None:
     json_path.write_text(
         json.dumps(
             {
+                "verifier": "exact-rational-v1",
                 "rows": rows,
-                "metrics": {
-                    row["model"]: detailed[row["model"]]
-                    for row in rows
-                },
+                "metrics": {row["model"]: detailed[row["model"]] for row in rows},
             },
             indent=2,
             ensure_ascii=False,
@@ -90,7 +91,7 @@ def main() -> None:
             f"{row['correct']}/{row['n']} "
             f"accuracy={row['accuracy']:.2%} "
             f"boxed={row['boxed_output_rate']:.2%} "
-            f"parseable={row['parseable_output_rate']:.2%}"
+            f"rational={row['rational_output_rate']:.2%}"
         )
     print(f"- CSV:  {csv_path}")
     print(f"- JSON: {json_path}")
