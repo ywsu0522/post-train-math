@@ -1,115 +1,69 @@
+from pathlib import Path
+
 import pandas as pd
 
 from posttrain_math.data import (
     ORIGINAL_COLUMNS,
-    add_eval_eligibility,
-    add_gt_boxed,
+    annotate_rational_cohort,
     split_raw_train,
 )
 
 
 def make_dataset() -> pd.DataFrame:
     rows = []
-
-    for level in (
-        "Level 1",
-        "Level 2",
-    ):
-        for problem_type in (
-            "Algebra",
-            "Geometry",
-        ):
+    for level in ("Level 1", "Level 2"):
+        for problem_type in ("Algebra", "Geometry"):
             for index in range(10):
                 rows.append(
                     {
-                        "problem": (
-                            f"{level} "
-                            f"{problem_type} "
-                            f"{index}"
-                        ),
-                        "solution": (
-                            "\\boxed{"
-                            f"{index}"
-                            "}"
-                        ),
-                        "type":
-                            problem_type,
-                        "level":
-                            level,
+                        "problem": f"{level} {problem_type} {index}",
+                        "solution": rf"\boxed{{{index}}}",
+                        "type": problem_type,
+                        "level": level,
                     }
                 )
+    return pd.DataFrame(rows, columns=ORIGINAL_COLUMNS)
 
-    return pd.DataFrame(
-        rows,
+
+def test_annotate_rational_cohort() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "problem": "a",
+                "solution": r"\boxed{6/8}",
+                "type": "Algebra",
+                "level": "Level 1",
+            },
+            {
+                "problem": "b",
+                "solution": r"\boxed{\sqrt{2}}",
+                "type": "Algebra",
+                "level": "Level 1",
+            },
+        ],
         columns=ORIGINAL_COLUMNS,
     )
+    result = annotate_rational_cohort(df)
+    assert result["rational_eligible"].tolist() == [True, False]
+    assert result.iloc[0]["gt_boxed"] == "6/8"
+    assert int(result.iloc[0]["gt_numerator"]) == 3
+    assert int(result.iloc[0]["gt_denominator"]) == 4
+    assert result.iloc[1]["rational_exclusion"] == "non_rational_boxed"
 
 
-def test_add_gt_boxed() -> None:
-    df = add_gt_boxed(
-        make_dataset()
-    )
-
-    assert "gt_boxed" in df.columns
-    assert df.iloc[0]["gt_boxed"] == "0"
-
-
-def test_add_eval_eligibility() -> None:
-    df = make_dataset().iloc[:2].copy()
-    df.loc[df.index[1], "solution"] = "no boxed answer"
-    df = add_eval_eligibility(add_gt_boxed(df))
-
-    assert df["eval_eligible"].tolist() == [True, False]
+def test_split_is_deterministic_and_disjoint() -> None:
+    df = annotate_rational_cohort(make_dataset())
+    train1, dev1 = split_raw_train(df, seed=42, dev_ratio=0.2)
+    train2, dev2 = split_raw_train(df, seed=42, dev_ratio=0.2)
+    pd.testing.assert_frame_equal(train1, train2)
+    pd.testing.assert_frame_equal(dev1, dev2)
+    assert set(train1["problem"]).isdisjoint(set(dev1["problem"]))
 
 
-def test_split_is_deterministic() -> None:
-    df = add_gt_boxed(
-        make_dataset()
-    )
-
-    train1, dev1 = split_raw_train(
-        df,
-        seed=42,
-        dev_ratio=0.2,
-    )
-
-    train2, dev2 = split_raw_train(
-        df,
-        seed=42,
-        dev_ratio=0.2,
-    )
-
-    pd.testing.assert_frame_equal(
-        train1,
-        train2,
-    )
-
-    pd.testing.assert_frame_equal(
-        dev1,
-        dev2,
-    )
-
-
-def test_train_dev_disjoint() -> None:
-    df = add_gt_boxed(
-        make_dataset()
-    )
-
-    train, dev = split_raw_train(
-        df,
-        seed=42,
-        dev_ratio=0.2,
-    )
-
-    assert set(
-        train["problem"]
-    ).isdisjoint(
-        set(dev["problem"])
-    )
-
-def test_download_raw_datasets_materializes_local_parquets(tmp_path, monkeypatch) -> None:
-    import pandas as pd
-
+def test_download_raw_datasets_uses_two_consolidated_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     import posttrain_math.data as data_module
 
     class FakeInfo:
@@ -118,47 +72,51 @@ def test_download_raw_datasets_materializes_local_parquets(tmp_path, monkeypatch
     class FakeApi:
         def dataset_info(self, repo_id: str, revision: str):
             assert repo_id == "org/math"
-            assert revision == data_module.HENDRYCKS_MATH_REVISION
+            assert revision == data_module.MATH_DATASET_REVISION
             return FakeInfo()
 
-    class FakeSplit:
-        def __init__(self, rows):
-            self._rows = rows
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    train_source = source_dir / "train.parquet"
+    test_source = source_dir / "test.parquet"
 
-        def to_pandas(self):
-            return pd.DataFrame(self._rows)
+    tiny_train = make_dataset().iloc[:4]
+    tiny_test = make_dataset().iloc[4:7]
+    tiny_train.to_parquet(train_source, index=False)
+    tiny_test.to_parquet(test_source, index=False)
 
-    def fake_load_dataset(repo_id, config_name, revision):
+    calls: list[str] = []
+
+    def fake_hf_hub_download(*, repo_id, filename, repo_type, revision):
         assert repo_id == "org/math"
+        assert repo_type == "dataset"
         assert revision == "dataset-sha"
-        row = {
-            "problem": f"{config_name} problem",
-            "solution": r"\\boxed{1}",
-            "type": config_name,
-            "level": "Level 1",
-        }
-        return {
-            "train": FakeSplit([row]),
-            "test": FakeSplit([row]),
-        }
+        calls.append(filename)
+        if filename == data_module.MATH_TRAIN_FILE:
+            return str(train_source)
+        if filename == data_module.MATH_TEST_FILE:
+            return str(test_source)
+        raise AssertionError(filename)
 
     monkeypatch.setattr(data_module, "HfApi", FakeApi)
-    monkeypatch.setattr(data_module.hf_datasets, "load_dataset", fake_load_dataset)
-    monkeypatch.setattr(data_module, "EXPECTED_RAW_TRAIN_ROWS", 7)
-    monkeypatch.setattr(data_module, "EXPECTED_RAW_TEST_ROWS", 7)
+    monkeypatch.setattr(data_module, "hf_hub_download", fake_hf_hub_download)
+    monkeypatch.setattr(data_module, "EXPECTED_RAW_TRAIN_ROWS", len(tiny_train))
+    monkeypatch.setattr(data_module, "EXPECTED_RAW_TEST_ROWS", len(tiny_test))
 
     train_path, test_path = data_module.download_raw_datasets(
         output_dir=tmp_path / "data",
         repo_id="org/math",
     )
 
-    assert train_path.is_file()
-    assert test_path.is_file()
-    assert len(pd.read_parquet(train_path)) == 7
-    assert len(pd.read_parquet(test_path)) == 7
+    assert calls == [data_module.MATH_TRAIN_FILE, data_module.MATH_TEST_FILE]
+    assert len(pd.read_parquet(train_path)) == len(tiny_train)
+    assert len(pd.read_parquet(test_path)) == len(tiny_test)
 
 
-def test_download_raw_datasets_reuses_complete_local_copy(tmp_path, monkeypatch) -> None:
+def test_download_raw_datasets_reuses_complete_local_copy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     import posttrain_math.data as data_module
 
     output_dir = tmp_path / "data"
@@ -174,11 +132,9 @@ def test_download_raw_datasets_reuses_complete_local_copy(tmp_path, monkeypatch)
             raise AssertionError("network lookup should not run")
 
     monkeypatch.setattr(data_module, "HfApi", FailApi)
-
     got_train, got_test = data_module.download_raw_datasets(
         output_dir=output_dir,
         repo_id="org/math",
     )
-
     assert got_train == train_path
     assert got_test == test_path

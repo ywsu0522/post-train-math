@@ -4,8 +4,7 @@
 
 ### Source code
 
-GitHub contains source, tests, documentation, dependency metadata, and small
-reference outputs. Large model/data/run files are not committed.
+GitHub contains source, tests, documentation, and dependency metadata. Large model/data/run files are not committed.
 
 ### Re-creatable external resources
 
@@ -82,7 +81,7 @@ run, or compare checkpoints.
 ## Hugging Face availability
 
 The project currently uses Hugging Face as the canonical upstream for OLMo and
-Hendrycks MATH. Exact revisions provide reproducibility, while the local/HF
+a pinned consolidated mirror of Hendrycks MATH. Exact revisions provide reproducibility, while the local/HF
 cache provides reuse. For stronger availability guarantees, add a separately
 managed mirror only after confirming redistribution licenses and documenting
 which registry is authoritative.
