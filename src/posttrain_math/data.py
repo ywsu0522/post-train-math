@@ -44,6 +44,99 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _read_download_manifest(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"Could not read raw dataset manifest: {path}"
+        ) from exc
+
+    if not isinstance(value, dict):
+        raise TypeError(
+            f"Raw dataset manifest must contain a JSON object: {path}"
+        )
+    return value
+
+
+def _validate_existing_raw_dataset(
+    *,
+    train_path: Path,
+    test_path: Path,
+    manifest_path: Path,
+    repo_id: str,
+    revision: str,
+) -> None:
+    manifest = _read_download_manifest(manifest_path)
+    errors: list[str] = []
+
+    if manifest.get("repo_id") != repo_id:
+        errors.append(
+            "repo_id mismatch: "
+            f"{manifest.get('repo_id')!r} != {repo_id!r}"
+        )
+
+    if manifest.get("requested_revision") != revision:
+        errors.append(
+            "requested_revision mismatch: "
+            f"{manifest.get('requested_revision')!r} != {revision!r}"
+        )
+
+    expected_source_files = {
+        "train": MATH_TRAIN_FILE,
+        "test": MATH_TEST_FILE,
+    }
+    if manifest.get("source_files") != expected_source_files:
+        errors.append(
+            "source_files mismatch: "
+            f"{manifest.get('source_files')!r} != {expected_source_files!r}"
+        )
+
+    sha256_manifest = manifest.get("sha256")
+    if not isinstance(sha256_manifest, dict):
+        errors.append("manifest is missing sha256 metadata")
+        sha256_manifest = {}
+
+    actual_train_sha256 = _sha256(train_path)
+    actual_test_sha256 = _sha256(test_path)
+
+    manifest_train_sha256 = sha256_manifest.get("train")
+    manifest_test_sha256 = sha256_manifest.get("test")
+
+    if manifest_train_sha256 != actual_train_sha256:
+        errors.append(
+            "train SHA256 mismatch: "
+            f"{actual_train_sha256} != {manifest_train_sha256}"
+        )
+
+    if manifest_test_sha256 != actual_test_sha256:
+        errors.append(
+            "test SHA256 mismatch: "
+            f"{actual_test_sha256} != {manifest_test_sha256}"
+        )
+
+    if repo_id == MATH_DATASET_REPO and revision == MATH_DATASET_REVISION:
+        if actual_train_sha256 != MATH_TRAIN_SHA256:
+            errors.append(
+                "pinned train SHA256 mismatch: "
+                f"{actual_train_sha256} != {MATH_TRAIN_SHA256}"
+            )
+
+        if actual_test_sha256 != MATH_TEST_SHA256:
+            errors.append(
+                "pinned test SHA256 mismatch: "
+                f"{actual_test_sha256} != {MATH_TEST_SHA256}"
+            )
+
+    if errors:
+        details = "\n".join(f"- {error}" for error in errors)
+        raise RuntimeError(
+            "Existing raw MATH dataset does not match the requested source:\n"
+            f"{details}\n"
+            "Use --force to replace the local raw dataset."
+        )
+
+
 def download_raw_datasets(
     *,
     output_dir: Path,
@@ -60,7 +153,14 @@ def download_raw_datasets(
     existing = [path for path in (train_path, test_path, manifest_path) if path.exists()]
     complete = train_path.is_file() and test_path.is_file() and manifest_path.is_file()
     if complete and not force:
-        print("Raw MATH dataset already present; skipping download")
+        _validate_existing_raw_dataset(
+            train_path=train_path,
+            test_path=test_path,
+            manifest_path=manifest_path,
+            repo_id=repo_id,
+            revision=revision,
+        )
+        print("Raw MATH dataset already present and verified; skipping download")
         print(f"- train: {train_path}")
         print(f"- test: {test_path}")
         return train_path, test_path

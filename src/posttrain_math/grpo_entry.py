@@ -23,7 +23,7 @@ def main() -> None:
             if is_main_process():
                 write_run_provenance(
                     output_dir=args.output_dir,
-                    algorithm="GRPO-original",
+                    algorithm="GRPO",
                     model_path=args.model,
                     data_dir=args.data_dir,
                     base_model_source=base_source,

@@ -302,7 +302,8 @@ def train_grpo(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     run_config = {
-        "algorithm": "GRPO-original",
+        "algorithm": "GRPO",
+        "variant": "original-grpo-loss",
         "git_commit": _git_commit(),
         "model": str(model_path),
         "base_model": str(base_model_path),
@@ -351,7 +352,7 @@ def train_grpo(
             json.dumps(run_config, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        print("Original GRPO training plan")
+        print("GRPO training plan")
         print(f"- SFT adapter: {model_path}")
         print(f"- base model: {base_model_path}")
         print(f"- cohort prompts: {len(train_dataset)}")
@@ -364,9 +365,9 @@ def train_grpo(
         print(f"- max completion length: {max_completion_length}")
         print(f"- max steps: {max_steps}")
         print(f"- learning rate: {learning_rate}")
-        print(f"- beta: {beta}")
         print("- reward: exact-rational-v1 binary {0,1}")
-        print("- GRPO loss_type: grpo")
+        print("- GRPO loss variant: original sequence-normalized GRPO")
+        print(f"- KL beta: {beta}")
         print(f"- precision: {precision}")
         print()
 
@@ -461,8 +462,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="posttrain-math-grpo",
         description=(
-            "Original GRPO post-training for a LoRA SFT checkpoint using "
-            "exact-rational-v1 binary outcome rewards."
+            "GRPO post-training for a LoRA SFT checkpoint using the original "
+            "sequence-normalized GRPO loss and exact-rational-v1 binary rewards."
         ),
     )
     parser.add_argument(

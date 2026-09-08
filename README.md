@@ -201,13 +201,18 @@ rate, exact-rational-output rate, and accuracy by level/type.
 The intended method progression is deliberately incremental:
 
 ```text
-REINFORCE -> RLOO -> original GRPO -> Dr.GRPO -> selected DAPO components
+REINFORCE -> RLOO -> GRPO (original loss) -> Dr.GRPO -> selected DAPO components
 ```
 
-The current implemented group-relative baseline is **original GRPO**. The TRL
-configuration explicitly sets `loss_type="grpo"`, `num_iterations=1`, and
-`scale_rewards="group"`; this avoids silently inheriting TRL's DAPO-style loss
-default. Reward is the same exact-rational binary verifier used by evaluation.
+The current implemented group-relative baseline is **GRPO with the original
+sequence-normalized GRPO loss**. The TRL configuration explicitly sets
+`loss_type="grpo"`, `num_iterations=1`, and `scale_rewards="group"` instead of
+inheriting TRL's current DAPO-style loss default.
+
+The baseline defaults to `beta=0` to avoid loading a reference model and to keep
+the comparison with subsequent RL methods memory-efficient. Therefore this is
+an algorithmic GRPO baseline, not a full reproduction of the original
+DeepSeekMath training recipe.
 
 ```bash
 bash scripts/launch_grpo.sh auto \
@@ -259,6 +264,4 @@ Normal execution uses `uv run --locked --no-sync`, which keeps experiment
 execution from mutating the environment.
 
 GitHub Actions runs `uv lock --check`, Ruff, and the CPU-compatible unit test
-suite on pushes and pull requests. GPU execution remains a separate hardware
-validation step because hosted CI runners do not provide the reference NVIDIA
-runtime.
+suite on pushes to `master` and on pull requests.

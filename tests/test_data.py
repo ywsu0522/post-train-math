@@ -1,6 +1,9 @@
+import hashlib
+import json
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from posttrain_math.data import (
     ORIGINAL_COLUMNS,
@@ -113,7 +116,7 @@ def test_download_raw_datasets_uses_two_consolidated_files(
     assert len(pd.read_parquet(test_path)) == len(tiny_test)
 
 
-def test_download_raw_datasets_reuses_complete_local_copy(
+def test_download_raw_datasets_reuses_verified_local_copy(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -121,20 +124,139 @@ def test_download_raw_datasets_reuses_complete_local_copy(
 
     output_dir = tmp_path / "data"
     output_dir.mkdir(parents=True)
+
     train_path = output_dir / "math_train.parquet"
     test_path = output_dir / "math_test.parquet"
-    train_path.write_bytes(b"existing")
-    test_path.write_bytes(b"existing")
-    (output_dir / "download_manifest.json").write_text("{}", encoding="utf-8")
+    manifest_path = output_dir / "download_manifest.json"
+
+    train_bytes = b"existing train"
+    test_bytes = b"existing test"
+    train_path.write_bytes(train_bytes)
+    test_path.write_bytes(test_bytes)
+
+    manifest = {
+        "repo_id": "org/math",
+        "requested_revision": data_module.MATH_DATASET_REVISION,
+        "resolved_commit": "dataset-sha",
+        "source_files": {
+            "train": data_module.MATH_TRAIN_FILE,
+            "test": data_module.MATH_TEST_FILE,
+        },
+        "sha256": {
+            "train": hashlib.sha256(train_bytes).hexdigest(),
+            "test": hashlib.sha256(test_bytes).hexdigest(),
+        },
+    }
+    manifest_path.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
 
     class FailApi:
         def __init__(self, *args, **kwargs):
             raise AssertionError("network lookup should not run")
 
     monkeypatch.setattr(data_module, "HfApi", FailApi)
+
     got_train, got_test = data_module.download_raw_datasets(
         output_dir=output_dir,
         repo_id="org/math",
     )
+
     assert got_train == train_path
     assert got_test == test_path
+
+
+def test_download_raw_datasets_rejects_stale_local_revision(
+    tmp_path: Path,
+) -> None:
+    import posttrain_math.data as data_module
+
+    output_dir = tmp_path / "data"
+    output_dir.mkdir(parents=True)
+
+    train_path = output_dir / "math_train.parquet"
+    test_path = output_dir / "math_test.parquet"
+    manifest_path = output_dir / "download_manifest.json"
+
+    train_bytes = b"existing train"
+    test_bytes = b"existing test"
+    train_path.write_bytes(train_bytes)
+    test_path.write_bytes(test_bytes)
+
+    manifest = {
+        "repo_id": "org/math",
+        "requested_revision": "old-revision",
+        "resolved_commit": "old-commit",
+        "source_files": {
+            "train": data_module.MATH_TRAIN_FILE,
+            "test": data_module.MATH_TEST_FILE,
+        },
+        "sha256": {
+            "train": hashlib.sha256(train_bytes).hexdigest(),
+            "test": hashlib.sha256(test_bytes).hexdigest(),
+        },
+    }
+    manifest_path.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="does not match the requested source",
+    ):
+        data_module.download_raw_datasets(
+            output_dir=output_dir,
+            repo_id="org/math",
+            revision="new-revision",
+        )
+
+
+def test_download_raw_datasets_rejects_corrupted_local_file(
+    tmp_path: Path,
+) -> None:
+    import posttrain_math.data as data_module
+
+    output_dir = tmp_path / "data"
+    output_dir.mkdir(parents=True)
+
+    train_path = output_dir / "math_train.parquet"
+    test_path = output_dir / "math_test.parquet"
+    manifest_path = output_dir / "download_manifest.json"
+
+    original_train = b"original train"
+    test_bytes = b"original test"
+
+    train_path.write_bytes(original_train)
+    test_path.write_bytes(test_bytes)
+
+    manifest = {
+        "repo_id": "org/math",
+        "requested_revision": data_module.MATH_DATASET_REVISION,
+        "resolved_commit": "dataset-sha",
+        "source_files": {
+            "train": data_module.MATH_TRAIN_FILE,
+            "test": data_module.MATH_TEST_FILE,
+        },
+        "sha256": {
+            "train": hashlib.sha256(original_train).hexdigest(),
+            "test": hashlib.sha256(test_bytes).hexdigest(),
+        },
+    }
+    manifest_path.write_text(
+        json.dumps(manifest),
+        encoding="utf-8",
+    )
+
+    # Simulate accidental modification after download.
+    train_path.write_bytes(b"corrupted train")
+
+    with pytest.raises(
+        RuntimeError,
+        match="train SHA256 mismatch",
+    ):
+        data_module.download_raw_datasets(
+            output_dir=output_dir,
+            repo_id="org/math",
+        )
