@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+  echo "Usage: bash scripts/launch_rl.sh <rloo|grpo|dr-grpo> <1|2|auto> [RL args...]" >&2
+  exit 2
+fi
+
+algorithm="$1"
+requested="$2"
+shift 2
+
+case "$algorithm" in
+  rloo|grpo|dr-grpo) ;;
+  *)
+    echo "Algorithm must be rloo, grpo, or dr-grpo; got: $algorithm" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$requested" == "auto" ]]; then
+  requested="$(
+    uv run --locked --no-sync python - <<'PY'
+import torch
+print(torch.cuda.device_count())
+PY
+  )"
+fi
+
+visible="$(
+  uv run --locked --no-sync python - <<'PY'
+import torch
+print(torch.cuda.device_count())
+PY
+)"
+
+if ! [[ "$requested" =~ ^[0-9]+$ ]] || [[ "$requested" -lt 1 ]]; then
+  echo "GPU count must be 1, 2, ... or auto; got: $requested" >&2
+  exit 2
+fi
+
+if [[ "$requested" -gt "$visible" ]]; then
+  echo "Requested $requested GPU(s), but only $visible are visible." >&2
+  exit 1
+fi
+
+if [[ "$requested" -eq 1 ]]; then
+  exec uv run --locked --no-sync python -m posttrain_math.rl_entry \
+    --algorithm "$algorithm" \
+    "$@"
+fi
+
+exec uv run --locked --no-sync torchrun \
+  --standalone \
+  --nproc_per_node="$requested" \
+  --module posttrain_math.rl_entry \
+  --algorithm "$algorithm" \
+  "$@"
