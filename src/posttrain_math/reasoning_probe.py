@@ -1,8 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+from importlib.metadata import version
 from pathlib import Path
 
 import pandas as pd
@@ -13,11 +15,31 @@ from posttrain_math.prompting import PROMPT_STRATEGIES
 from posttrain_math.rewards import score_exact_rational_completion
 from posttrain_math.rl_common import (
     build_exact_rational_rl_dataset,
+    git_commit,
     load_sft_adapter,
     resolve_rl_precision,
 )
 
 PREFIX_FRACTIONS: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for block in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _runtime_provenance() -> dict[str, str | None]:
+    return {
+        "git_commit": git_commit(),
+        "torch": torch.__version__,
+        "transformers": version("transformers"),
+        "peft": version("peft"),
+        "datasets": version("datasets"),
+        "pandas": pd.__version__,
+    }
 
 
 def wilson_interval(
@@ -114,11 +136,85 @@ def _decode(tokenizer, token_ids: list[int]) -> str:
 
 
 def pre_box_token_limit(tokenizer, token_ids: list[int]) -> int:
-    r"""Return the largest prefix token count before any explicit \boxed marker."""
+    r"""Return a conservative token boundary before the first \boxed marker.
+
+    The marker can span multiple tokenizer pieces. We therefore align token-prefix
+    decodes against the character position where ``\boxed`` starts and keep only
+    prefixes whose decoded text ends before that position. This prevents a state
+    such as a trailing ``\bo``/``\box`` from leaking part of the answer marker.
+    """
+    full_text = _decode(tokenizer, token_ids)
+    marker_start = full_text.find(r"\boxed")
+    if marker_start < 0:
+        return len(token_ids)
+
+    safe_count = 0
     for end in range(1, len(token_ids) + 1):
-        if r"\boxed" in _decode(tokenizer, token_ids[:end]):
-            return end - 1
-    return len(token_ids)
+        prefix_text = _decode(tokenizer, token_ids[:end])
+        if len(prefix_text) > marker_start:
+            break
+        if full_text.startswith(prefix_text):
+            safe_count = end
+    return safe_count
+
+
+def _load_selection_contract(
+    selection_path: Path,
+    *,
+    split: str,
+    prompt_name: str,
+    max_completion_length: int,
+    temperature: float,
+    top_p: float,
+) -> tuple[dict[str, object], Path]:
+    config_path = selection_path.parent / "probe_config.json"
+    if not config_path.is_file():
+        raise FileNotFoundError(
+            "Frontier selection must be accompanied by its prompt-success "
+            f"probe_config.json: {config_path}"
+        )
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid selection probe config: {config_path}") from exc
+    if not isinstance(config, dict):
+        raise TypeError(f"Selection probe config must be a JSON object: {config_path}")
+
+    expected = {
+        "probe": "prompt-success-v1",
+        "split": split,
+        "cohort": "exact-rational-v1",
+        "prompt": prompt_name,
+        "max_completion_length": max_completion_length,
+    }
+    mismatches = [
+        f"{key}: {config.get(key)!r} != {value!r}"
+        for key, value in expected.items()
+        if config.get(key) != value
+    ]
+
+    sampling = config.get("sampling")
+    if not isinstance(sampling, dict):
+        mismatches.append("sampling: missing or not an object")
+    else:
+        for key, value in (("temperature", temperature), ("top_p", top_p)):
+            try:
+                actual = float(sampling.get(key))
+            except (TypeError, ValueError):
+                mismatches.append(f"sampling.{key}: missing or non-numeric")
+            else:
+                if not math.isclose(actual, value, rel_tol=0.0, abs_tol=1e-12):
+                    mismatches.append(f"sampling.{key}: {actual!r} != {value!r}")
+        if sampling.get("top_k") != 0:
+            mismatches.append(f"sampling.top_k: {sampling.get('top_k')!r} != 0")
+
+    if mismatches:
+        details = "\n".join(f"- {item}" for item in mismatches)
+        raise ValueError(
+            "Prefix-value probe sampling/data contract does not match the "
+            f"frontier selection artifact:\n{details}"
+        )
+    return config, config_path
 
 
 def _load_probe_policy(
@@ -243,6 +339,7 @@ def probe_prompt_success(
         pd.DataFrame(branch_rows).to_parquet(branches_path, index=False)
         config = {
             "probe": "prompt-success-v1",
+            "runtime": _runtime_provenance(),
             "model": str(model_path),
             "base_model": str(base_model_path),
             "base_model_source": base_source,
@@ -297,8 +394,22 @@ def probe_prefix_values(
     if not selection_path.is_file():
         raise FileNotFoundError(f"Prompt selection file not found: {selection_path}")
 
+    selection_config, selection_config_path = _load_selection_contract(
+        selection_path,
+        split=split,
+        prompt_name=prompt_name,
+        max_completion_length=max_completion_length,
+        temperature=temperature,
+        top_p=top_p,
+    )
     selection = pd.read_parquet(selection_path)
-    required_selection = {"prompt_id", "p_hat"}
+    required_selection = {
+        "prompt_id",
+        "p_hat",
+        "problem",
+        "gt_numerator",
+        "gt_denominator",
+    }
     missing = required_selection - set(selection.columns)
     if missing:
         raise ValueError(f"Selection file missing columns: {sorted(missing)}")
@@ -335,6 +446,28 @@ def probe_prefix_values(
         )
         records = [record for record in dataset if str(record["prompt_id"]) in selected_ids]
         record_by_id = {str(record["prompt_id"]): record for record in records}
+        for row in frontier.itertuples(index=False):
+            prompt_id = str(row.prompt_id)
+            record = record_by_id.get(prompt_id)
+            if record is None:
+                continue
+            selection_identity = (
+                str(row.problem),
+                int(row.gt_numerator),
+                int(row.gt_denominator),
+            )
+            dataset_identity = (
+                str(record["problem"]),
+                int(record["gt_numerator"]),
+                int(record["gt_denominator"]),
+            )
+            if selection_identity != dataset_identity:
+                raise ValueError(
+                    "Frontier selection identity does not match the requested "
+                    f"processed dataset for {prompt_id}: "
+                    f"{selection_identity!r} != {dataset_identity!r}"
+                )
+
         ordered_records = [
             record_by_id[prompt_id]
             for prompt_id in frontier["prompt_id"].astype(str)
@@ -481,6 +614,7 @@ def probe_prefix_values(
         pd.DataFrame(branch_rows).to_parquet(branches_path, index=False)
         config = {
             "probe": "mc-prefix-value-v1",
+            "runtime": _runtime_provenance(),
             "definition": (
                 "V_hat(prefix) = mean exact-rational-v1 terminal reward over "
                 "fresh continuations sampled from that textual prefix"
@@ -497,7 +631,15 @@ def probe_prefix_values(
             "cohort": "exact-rational-v1",
             "prompt": prompt_name,
             "data": stats,
-            "selection": str(selection_path),
+            "selection": {
+                "path": str(selection_path),
+                "sha256": _sha256(selection_path),
+                "probe_config_path": str(selection_config_path),
+                "probe_config_sha256": _sha256(selection_config_path),
+                "source_model": selection_config.get("model"),
+                "source_rollouts": selection_config.get("rollouts"),
+                "source_seed": selection_config.get("seed"),
+            },
             "frontier": {"min_p": min_p, "max_p": max_p, "prompts": len(frontier)},
             "prefix_fractions": list(PREFIX_FRACTIONS),
             "prefix_domain": "pre-box textual span; explicit \\boxed marker excluded",
@@ -624,3 +766,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

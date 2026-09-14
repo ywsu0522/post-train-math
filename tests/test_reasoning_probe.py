@@ -36,6 +36,19 @@ class _FakeTokenizer:
         return "".join(self.pieces[token] for token in token_ids)
 
 
+class _SplitMarkerTokenizer:
+    def __init__(self) -> None:
+        self.pieces = {1: "work ", 2: r"\bo", 3: "xed", 4: "{2}"}
+
+    def decode(self, token_ids, skip_special_tokens=True):
+        del skip_special_tokens
+        return "".join(self.pieces[token] for token in token_ids)
+
+
 def test_prefix_probe_excludes_explicit_boxed_answer_tokens() -> None:
     assert pre_box_token_limit(_FakeTokenizer(), [1, 2, 3]) == 1
     assert pre_box_token_limit(_FakeTokenizer(), [1]) == 1
+
+
+def test_prefix_probe_excludes_partial_split_boxed_marker() -> None:
+    assert pre_box_token_limit(_SplitMarkerTokenizer(), [1, 2, 3, 4]) == 1

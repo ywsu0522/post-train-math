@@ -63,7 +63,7 @@ uv run --locked --no-sync python -m posttrain_math.reasoning_probe prompt-succes
   --output-dir runs/probes/sft-dev-prompt-success
 ```
 
-This writes raw completions plus `prompt_success.parquet` with `p_hat` and a Wilson interval. The prompt IDs become a frozen selection artifact.
+This writes raw completions plus `prompt_success.parquet` with `p_hat` and a Wilson interval. The prompt IDs become a frozen selection artifact. `probe_config.json` records the sampling contract and runtime provenance; the prefix-value probe validates that contract and records SHA256 hashes for both selection files before using them.
 
 ### Step 2: estimate prefix continuation value on the same frontier prompts
 
