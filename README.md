@@ -11,6 +11,14 @@ by the final `\boxed{...}` marker with a small deterministic parser based on
 Python `fractions.Fraction`. No symbolic or natural-language verifier participates
 in the primary RL reward.
 
+
+The research focus is not to assume that outcome RLVR directly supervises
+reasoning. The project separates two questions: **when do policy-gradient
+estimators use sparse verifier rewards efficiently, and when do higher terminal
+rewards correspond to textual intermediate states from which future success is
+actually more likely?** Training remains outcome-only; reasoning-path analysis is
+a separate diagnostic. See [`docs/rl_research.md`](docs/rl_research.md).
+
 ## Reference environment
 
 The reference GPU runtime is Linux x86_64 with:
@@ -198,44 +206,105 @@ rate, exact-rational-output rate, and accuracy by level/type.
 
 ## RLVR
 
-The intended method progression is deliberately incremental:
+Full model training uses maintained TRL trainers; this repository keeps small
+reference implementations of estimator/objective formulas so the semantics are
+unit-testable without maintaining a second RL framework.
 
-```text
-REINFORCE -> RLOO -> GRPO (original loss) -> Dr.GRPO -> selected DAPO components
-```
+The controlled first-stage matrix is:
 
-The current implemented group-relative baseline is **GRPO with the original
-sequence-normalized GRPO loss**. The TRL configuration explicitly sets
-`loss_type="grpo"`, `num_iterations=1`, and `scale_rewards="group"` instead of
-inheriting TRL's current DAPO-style loss default.
+| Method | Backend | Status / contract |
+| --- | --- | --- |
+| REINFORCE | project reference objective | mathematical baseline only; no custom 1B trainer |
+| RLOO | TRL `RLOOTrainer` | leave-one-out reward baseline, no advantage normalization |
+| GRPO | TRL `GRPOTrainer` | original `loss_type="grpo"`, `scale_rewards="group"` |
+| Dr.GRPO | TRL `GRPOTrainer` | `loss_type="dr_grpo"`, `scale_rewards="none"` |
+| PPO | reference clipped objective | production backend intentionally deferred |
 
-The baseline defaults to `beta=0` to avoid loading a reference model and to keep
-the comparison with subsequent RL methods memory-efficient. Therefore this is
-an algorithmic GRPO baseline, not a full reproduction of the original
-DeepSeekMath training recipe.
+RLOO, GRPO, and Dr.GRPO all use `num_iterations=1`. Controlled estimator
+comparisons default to `beta=0`, `temperature=1.0`, `top_p=1.0`, `top_k=0`, and
+disabled dropout. This keeps the first experiments on-policy and avoids silently
+mixing estimator changes with nucleus/temperature truncation or KL penalties.
+Every run records the explicit estimator contract and pinned TRL version in
+`run_config.json`.
+
+Run a backend with the common launcher:
 
 ```bash
-bash scripts/launch_grpo.sh auto \
+# RLOO
+bash scripts/launch_rl.sh rloo auto \
+  --model runs/olmo2-1b-lora-sft-v1/final-model \
+  --output-dir runs/olmo2-1b-rloo-v1 \
+  --max-steps 100
+
+# original GRPO
+bash scripts/launch_rl.sh grpo auto \
   --model runs/olmo2-1b-lora-sft-v1/final-model \
   --output-dir runs/olmo2-1b-grpo-v1 \
   --max-steps 100
+
+# Dr.GRPO
+bash scripts/launch_rl.sh dr-grpo auto \
+  --model runs/olmo2-1b-lora-sft-v1/final-model \
+  --output-dir runs/olmo2-1b-dr-grpo-v1 \
+  --max-steps 100
 ```
 
-`run_config.json` records the rollout budget, number of generations, prompt
-groups per update, verifier name, and explicit GRPO loss settings. REINFORCE and
-RLOO should be added as separate baseline implementations before introducing
-Dr.GRPO/DAPO mechanisms so changes in optimization can be attributed cleanly.
+`scripts/launch_grpo.sh` remains as a backwards-compatible wrapper around
+`launch_rl.sh grpo`.
 
-Evaluate a sequence of checkpoints with:
+Fair comparisons should be reported against generated completion/token budget,
+verifier calls, and GPU time in addition to optimizer steps. For binary reward
+and group size `G`, the predicted fraction of groups with both successes and
+failures is `1 - p^G - (1-p)^G`; comparing that prediction with observed useful
+groups is part of the planned reward-topology analysis.
+
+### Continuation-value reasoning probe
+
+Training reward remains **terminal-only**. A separate frozen-policy probe
+estimates the empirical continuation value of a textual prefix by sampling fresh
+continuations and applying the same `exact-rational-v1` terminal verifier.
+
+First estimate SFT prompt success probabilities on dev and freeze a frontier
+prompt set:
+
+```bash
+uv run --locked --no-sync python -m posttrain_math.reasoning_probe prompt-success \
+  --model runs/olmo2-1b-lora-sft-v1/final-model \
+  --split dev \
+  --rollouts 8 \
+  --limit-prompts 128 \
+  --output-dir runs/probes/sft-dev-prompt-success
+```
+
+Then evaluate fixed 0/25/50/75% prefixes of the pre-box span on SFT and an RL checkpoint using the
+same selection artifact:
+
+```bash
+uv run --locked --no-sync python -m posttrain_math.reasoning_probe prefix-value \
+  --model runs/olmo2-1b-grpo-v1/final-model \
+  --split dev \
+  --selection runs/probes/sft-dev-prompt-success/prompt_success.parquet \
+  --min-p 0.125 --max-p 0.875 \
+  --limit-prompts 32 \
+  --branch-rollouts 8 \
+  --output-dir runs/probes/grpo-dev-prefix-value
+```
+
+This probe measures **continuation success under the policy**, not hidden-state
+interpretability, causal faithfulness of chain-of-thought, or deterministic
+step correctness. Keyword-defined "aha moments" and process judges are deferred
+until this fixed-prefix pilot demonstrates a signal worth explaining. The full
+research contract is in [`docs/rl_research.md`](docs/rl_research.md).
+
+Evaluate a sequence of RL checkpoints with:
 
 ```bash
 bash scripts/eval_checkpoints.sh auto runs/olmo2-1b-grpo-v1
 ```
-
 ## Artifact contract
 
 Local generated artifacts belong under `runs/<experiment>/`. Successful SFT and
-GRPO runs create `provenance.json` containing the git commit/dirty state,
+RL runs create `provenance.json` containing the git commit/dirty state,
 `uv.lock` hash, model and dataset source manifests, processed-data manifest, and
 hardware/runtime report. Keep configuration, logs, metrics, checkpoints needed
 for resume, and the final model/adapter together.

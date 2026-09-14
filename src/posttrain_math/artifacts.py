@@ -541,7 +541,7 @@ def write_run_provenance(
     return path
 
 
-def rewrite_grpo_run_config(
+def rewrite_rl_run_config(
     *,
     run_dir: Path,
     original_adapter_path: Path,
@@ -589,4 +589,17 @@ def rewrite_grpo_run_config(
     _write_json(
         path,
         config,
+    )
+
+def rewrite_grpo_run_config(
+    *,
+    run_dir: Path,
+    original_adapter_path: Path,
+    base_source: dict[str, Any],
+) -> None:
+    """Backward-compatible alias for older GRPO entry points."""
+    rewrite_rl_run_config(
+        run_dir=run_dir,
+        original_adapter_path=original_adapter_path,
+        base_source=base_source,
     )
