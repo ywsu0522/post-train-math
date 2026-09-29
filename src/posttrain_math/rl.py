@@ -15,9 +15,9 @@ from posttrain_math.distributed import (
     resolve_gradient_accumulation,
 )
 from posttrain_math.prompting import PROMPT_STRATEGIES
-from posttrain_math.rewards import make_exact_rational_reward
+from posttrain_math.rewards import make_boxed_numeric_reward
 from posttrain_math.rl_common import (
-    build_exact_rational_rl_dataset,
+    build_boxed_numeric_rl_dataset,
     git_commit,
     load_sft_adapter,
     resolve_rl_precision,
@@ -299,7 +299,7 @@ def train_rl(
         precision=precision,
         trainable=True,
     )
-    train_dataset, data_stats = build_exact_rational_rl_dataset(
+    train_dataset, data_stats = build_boxed_numeric_rl_dataset(
         data_dir=data_dir,
         tokenizer=tokenizer,
         prompt_name=prompt_name,
@@ -357,7 +357,7 @@ def train_rl(
         "model": str(model_path),
         "base_model": str(base_model_path),
         "data_dir": str(data_dir),
-        "cohort": "exact-rational-v1",
+        "cohort": "boxed-numeric-v1",
         "prompt": prompt_name,
         "data": data_stats,
         "max_steps": max_steps,
@@ -377,7 +377,7 @@ def train_rl(
             "repetition_penalty": 1.0,
         },
         "reward": {
-            "verifier": "exact-rational-v1",
+            "verifier": "boxed-numeric-v1",
             "correct": 1.0,
             "otherwise": 0.0,
             "process_supervision": False,
@@ -422,7 +422,7 @@ def train_rl(
         print(f"- max completion length: {max_completion_length}")
         print(f"- max steps: {max_steps}")
         print(f"- learning rate: {learning_rate}")
-        print("- reward: exact-rational-v1 binary {0,1}; no process reward")
+        print("- reward: boxed-numeric-v1 binary {0,1}; no process reward")
         print(f"- sampling: temperature={temperature}, top_p={top_p}")
         print(f"- KL beta: {beta}")
         print(f"- precision: {precision}")
@@ -431,7 +431,7 @@ def train_rl(
     trainer_cls = RLOOTrainer if algorithm == "rloo" else GRPOTrainer
     trainer = trainer_cls(
         model=model,
-        reward_funcs=make_exact_rational_reward(),
+        reward_funcs=make_boxed_numeric_reward(),
         args=trainer_config,
         train_dataset=train_dataset,
         processing_class=tokenizer,
@@ -480,7 +480,7 @@ def build_parser(*, fixed_algorithm: str | None = None) -> argparse.ArgumentPars
     parser = argparse.ArgumentParser(
         prog="posttrain-math-rl",
         description=(
-            "Controlled exact-rational RLVR using explicit TRL-backed RLOO, "
+            "Controlled boxed-numeric RLVR using explicit TRL-backed RLOO, "
             "original GRPO, or Dr.GRPO semantics."
         ),
     )

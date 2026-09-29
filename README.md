@@ -2,13 +2,13 @@
 
 Reproducible post-training experiments for mathematical language models. The
 reference pipeline uses OLMo 2 1B and Hendrycks MATH for deterministic data
-preparation, completion-only SFT, exact-rational evaluation, and RLVR.
+preparation, completion-only SFT, boxed-numeric evaluation, and RLVR.
 
-The central evaluation/reward contract is deliberately narrow: **exact-rational-v1**.
+The central evaluation/reward contract is deliberately narrow: **boxed-numeric-v1**.
 Gold solutions are eligible only when they contain exactly one well-formed
-`\boxed{...}` whose content is an exact rational number. Model outputs are scored
+`\boxed{...}` whose content matches the numeric grammar below. Model outputs are scored
 by the final `\boxed{...}` marker with a small deterministic parser based on
-Python `fractions.Fraction`. No symbolic or natural-language verifier participates
+Python `decimal.Decimal` and `fractions.Fraction`. No symbolic or natural-language verifier participates
 in the primary RL reward.
 
 
@@ -81,7 +81,7 @@ uv run --locked --no-sync posttrain-math data prepare
 Each download records the upstream resolved commit and file SHA256 values.
 `models/`, `data/`, and `runs/` remain gitignored.
 
-## exact-rational-v1 cohort
+## boxed-numeric-v1 cohort
 
 `data prepare` retains the full rows used by SFT and adds deterministic cohort
 metadata:
@@ -89,54 +89,78 @@ metadata:
 - `gt_boxed`
 - `gt_numerator`
 - `gt_denominator`
-- `rational_eligible`
-- `rational_exclusion`
+- `numeric_eligible`
+- `numeric_exclusion`
 
-A gold row is eligible when its solution contains exactly one well-formed,
-non-empty `\boxed{...}` marker and the boxed content matches one of:
+A gold row is eligible when its solution contains exactly one literal `\boxed`
+marker, that marker is well-formed and non-empty, and its content successfully
+parses under this grammar after stripping only leading/trailing whitespace:
 
 ```text
-42
--17
-3/5
--3/5
-\frac{3}{5}
--\frac{3}{5}
+digits   := [0-9]+
+number   := ["-"] digits ["." digits] ["\%"]
+fraction := ["-"] "\frac{" digits "}{" digits "}"
+answer   := number | fraction
 ```
 
-Signed numerators/denominators are accepted and canonicalized with
-`fractions.Fraction`; denominator zero is rejected. Decimal, radical, symbolic,
-unit-bearing, tuple, interval, percentage, equation, and prose answers are out of
-domain by design.
+The stripped content must full-match `answer`; no internal whitespace is removed.
+Numbers are parsed exactly with `decimal.Decimal`, divided by 100 when the
+optional escaped `\%` suffix is present, then converted to `fractions.Fraction`.
+LaTeX fractions are constructed directly with `Fraction(numerator, denominator)`;
+its native `ZeroDivisionError` is caught as an invalid parse. Both paths return
+canonical `Fraction` values. Examples include `42`, `-17`, `0.5`, `50\%`,
+`\frac{3}{5}`, and `-\frac{3}{5}`. A plus sign, a sign inside fraction braces,
+slash fractions (`3/5`), bare `%`, scientific notation, radicals, symbols, units,
+tuples, intervals, equations, and prose are outside this grammar.
 
 For the pinned 12,500-row source, the cohort audit is:
 
-| split | source rows | exact-rational-v1 | retention |
+| split | source rows | boxed-numeric-v1 | retention |
 | --- | ---: | ---: | ---: |
-| source train | 7,500 | 5,448 | 72.64% |
-| test | 5,000 | 3,592 | 71.84% |
-| combined | 12,500 | 9,040 | 72.32% |
+| source train | 7,500 | 5,586 | 74.48% |
+| test | 5,000 | 3,686 | 73.72% |
+| combined | 12,500 | 9,272 | 74.176% |
+
+These counts were recomputed with `data prepare` using the pinned raw files and
+the current parser. `data download` verifies their revision and SHA256 before
+reuse. The generated `data/processed/manifest.json` records `source_train`,
+processed `train`/`dev`, `test`, and `combined` audits; combined counts each source
+row once. No cohort row count is hardcoded in data preparation.
+
+| exclusion | source train | test | combined |
+| --- | ---: | ---: | ---: |
+| `non_numeric_boxed` | 1,796 | 1,224 | 3,020 |
+| `multiple_boxed` | 114 | 90 | 204 |
+| `empty_boxed` | 2 | 0 | 2 |
+| `malformed_boxed` | 2 | 0 | 2 |
+| `no_boxed` | 0 | 0 | 0 |
+| `zero_denominator` | 0 | 0 | 0 |
+| total excluded | 1,914 | 1,314 | 3,228 |
 
 The processed manifest records exclusion counts and `type × level` source/cohort
 shares so selection drift is explicit. The regular train/dev split is still
 stratified on `type × level`; SFT can therefore continue to use the complete
-training split, while evaluation and RL select `rational_eligible == True`.
+training split, while evaluation and RL select `numeric_eligible == True`.
 
 ## Verifier contract
 
 For a model completion, only the **final** `\boxed` marker is considered. If the
-final marker is malformed or its content is outside the exact-rational grammar,
-the prediction is invalid. The verifier never falls back to an earlier box, a
-last number in prose, a decimal approximation, or symbolic equivalence.
+final marker is malformed or its content fails numeric parsing, reward is `0`.
+The verifier never falls back to an earlier box or a number in prose. It compares
+only the canonical prediction and gold `Fraction` values: equality gives `1`,
+otherwise `0`. There is no tolerance or symbolic equivalence.
 
 Examples:
 
 ```text
-gold = 1/2
-prediction = \boxed{2/4}       -> correct
-prediction = \boxed{0.5}       -> incorrect
+gold canonical Fraction = 1/2
+prediction = \boxed{\frac{2}{4}} -> correct
+prediction = \boxed{0.5}       -> correct
+prediction = \boxed{50\%}      -> correct
+prediction = \boxed{2/4}       -> incorrect
 prediction = \boxed{\sqrt{1/4}} -> incorrect
 prediction = "answer is 1/2"   -> incorrect
+prediction = \boxed{0.5} then \boxed{1/0} -> incorrect (no fallback)
 ```
 
 The same parser is used for base OLMo, SFT checkpoints, RL checkpoints, offline
@@ -200,9 +224,12 @@ bash scripts/launch_gpu.sh auto eval \
   --output-dir runs/evals/olmo2-1b-lora-sft-v1
 ```
 
-Evaluation automatically selects the fixed `exact-rational-v1` cohort and writes
+Evaluation automatically selects the fixed `boxed-numeric-v1` cohort and writes
 `predictions.jsonl` plus `metrics.json`. Metrics include accuracy, boxed-output
-rate, exact-rational-output rate, and accuracy by level/type.
+rate, `numeric_output_rate`, and accuracy by level/type. Prediction records use
+`prediction_numeric`, and metrics count valid numeric outputs in `num_pred_numeric`.
+Re-run `data prepare` to regenerate processed metadata before evaluation or RL;
+older processed datasets and evaluation metrics are not compatible with this contract.
 
 ## RLVR
 
@@ -262,7 +289,7 @@ groups is part of the planned reward-topology analysis.
 
 Training reward remains **terminal-only**. A separate frozen-policy probe
 estimates the empirical continuation value of a textual prefix by sampling fresh
-continuations and applying the same `exact-rational-v1` terminal verifier.
+continuations and applying the same `boxed-numeric-v1` terminal verifier.
 
 First estimate SFT prompt success probabilities on dev and freeze a frontier
 prompt set:

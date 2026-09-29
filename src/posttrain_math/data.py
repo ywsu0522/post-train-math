@@ -11,21 +11,19 @@ import pandas as pd
 from huggingface_hub import HfApi, hf_hub_download
 from sklearn.model_selection import train_test_split
 
-from posttrain_math.answers import RationalGold, classify_exact_rational_solution
+from posttrain_math.answers import NumericGold, classify_boxed_numeric_solution
 
 ORIGINAL_COLUMNS = ["problem", "solution", "type", "level"]
 COHORT_COLUMNS = [
     "gt_boxed",
     "gt_numerator",
     "gt_denominator",
-    "rational_eligible",
-    "rational_exclusion",
+    "numeric_eligible",
+    "numeric_exclusion",
 ]
 
 EXPECTED_RAW_TRAIN_ROWS = 7500
 EXPECTED_RAW_TEST_ROWS = 5000
-EXPECTED_EXACT_RATIONAL_TRAIN_ROWS = 5448
-EXPECTED_EXACT_RATIONAL_TEST_ROWS = 3592
 
 MATH_DATASET_REPO = "DigitalLearningGmbH/MATH-lighteval"
 MATH_DATASET_REVISION = "f06834690385b29df31ccc717250746a3ba0322b"
@@ -33,7 +31,7 @@ MATH_TRAIN_FILE = "data/train-00000-of-00001.parquet"
 MATH_TEST_FILE = "data/test-00000-of-00001.parquet"
 MATH_TRAIN_SHA256 = "eca6e667f4305dd5e5ba09b4fd55e7f3174a0fbe361cdfd4c44758b593a76933"
 MATH_TEST_SHA256 = "7dca8d6e41af88ecf82f2b5f36eb5530e083aaaa86ee325f62bd5c31535178c6"
-COHORT_NAME = "exact-rational-v1"
+COHORT_NAME = "boxed-numeric-v1"
 
 
 def _sha256(path: Path) -> str:
@@ -298,8 +296,8 @@ def inspect_raw_datasets(train_path: Path, test_path: Path) -> None:
 
     for name, df in (("Raw train", raw_train), ("Raw test", raw_test)):
         duplicate_rows = int(df.duplicated(subset=ORIGINAL_COLUMNS, keep="first").sum())
-        cohort = annotate_rational_cohort(df)
-        eligible = int(cohort["rational_eligible"].sum())
+        cohort = annotate_numeric_cohort(df)
+        eligible = int(cohort["numeric_eligible"].sum())
         print(name)
         print(f"  rows: {len(df)}")
         print(f"  duplicated rows: {duplicate_rows}")
@@ -312,7 +310,7 @@ def inspect_raw_datasets(train_path: Path, test_path: Path) -> None:
     print(f"  exact problem overlap: {len(overlap)} [{'PASS' if not overlap else 'FAIL'}]")
 
 
-def _classification_columns(classification: RationalGold) -> tuple[Any, ...]:
+def _classification_columns(classification: NumericGold) -> tuple[Any, ...]:
     return (
         classification.gt_boxed,
         classification.numerator,
@@ -322,11 +320,11 @@ def _classification_columns(classification: RationalGold) -> tuple[Any, ...]:
     )
 
 
-def annotate_rational_cohort(df: pd.DataFrame) -> pd.DataFrame:
-    """Annotate rows with deterministic exact-rational-v1 gold metadata."""
+def annotate_numeric_cohort(df: pd.DataFrame) -> pd.DataFrame:
+    """Annotate rows with deterministic boxed-numeric-v1 gold metadata."""
     result = df.copy()
     classifications = [
-        classify_exact_rational_solution(str(solution))
+        classify_boxed_numeric_solution(str(solution))
         for solution in result["solution"]
     ]
     columns = [_classification_columns(item) for item in classifications]
@@ -334,8 +332,8 @@ def annotate_rational_cohort(df: pd.DataFrame) -> pd.DataFrame:
     result["gt_boxed"] = [row[0] for row in columns]
     result["gt_numerator"] = pd.array([row[1] for row in columns], dtype="Int64")
     result["gt_denominator"] = pd.array([row[2] for row in columns], dtype="Int64")
-    result["rational_eligible"] = [bool(row[3]) for row in columns]
-    result["rational_exclusion"] = [row[4] for row in columns]
+    result["numeric_eligible"] = [bool(row[3]) for row in columns]
+    result["numeric_exclusion"] = [row[4] for row in columns]
     return result
 
 
@@ -369,13 +367,13 @@ def _same_rows_unordered(
 
 
 def _exclusion_counts(df: pd.DataFrame) -> dict[str, int]:
-    values = df.loc[~df["rational_eligible"], "rational_exclusion"].dropna().astype(str)
+    values = df.loc[~df["numeric_eligible"], "numeric_exclusion"].dropna().astype(str)
     return dict(sorted(Counter(values).items()))
 
 
 def _cohort_cell_stats(df: pd.DataFrame) -> dict[str, Any]:
     source_counts = df.groupby(["type", "level"], dropna=False).size()
-    cohort_df = df[df["rational_eligible"]]
+    cohort_df = df[df["numeric_eligible"]]
     cohort_counts = cohort_df.groupby(["type", "level"], dropna=False).size()
     source_total = len(df)
     cohort_total = len(cohort_df)
@@ -415,7 +413,7 @@ def _cohort_cell_stats(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def _cohort_summary(df: pd.DataFrame) -> dict[str, Any]:
-    eligible = int(df["rational_eligible"].sum())
+    eligible = int(df["numeric_eligible"].sum())
     return {
         "source_rows": len(df),
         "eligible_rows": eligible,
@@ -452,26 +450,8 @@ def prepare_datasets(
     if overlap:
         raise ValueError(f"Raw train/test problem overlap detected: {len(overlap)}")
 
-    annotated_train = annotate_rational_cohort(raw_train)
-    annotated_test = annotate_rational_cohort(raw_test).reset_index(drop=True)
-
-    canonical_source = (
-        len(raw_train) == 7500
-        and len(raw_test) == 5000
-    )
-    if canonical_source:
-        train_cohort_rows = int(annotated_train["rational_eligible"].sum())
-        test_cohort_rows = int(annotated_test["rational_eligible"].sum())
-        if train_cohort_rows != EXPECTED_EXACT_RATIONAL_TRAIN_ROWS:
-            raise RuntimeError(
-                f"{COHORT_NAME} train count drift: {train_cohort_rows} "
-                f"!= {EXPECTED_EXACT_RATIONAL_TRAIN_ROWS}"
-            )
-        if test_cohort_rows != EXPECTED_EXACT_RATIONAL_TEST_ROWS:
-            raise RuntimeError(
-                f"{COHORT_NAME} test count drift: {test_cohort_rows} "
-                f"!= {EXPECTED_EXACT_RATIONAL_TEST_ROWS}"
-            )
+    annotated_train = annotate_numeric_cohort(raw_train)
+    annotated_test = annotate_numeric_cohort(raw_test).reset_index(drop=True)
 
     train_df, dev_df = split_raw_train(
         annotated_train,
@@ -515,14 +495,20 @@ def prepare_datasets(
     cohort_manifest = {
         "name": COHORT_NAME,
         "definition": (
-            "gold solution contains exactly one well-formed non-empty \\boxed{...}; "
-            "boxed content is a signed integer, a/b, or \\frac{a}{b}; denominator != 0; "
-            "canonicalized with fractions.Fraction"
+            "gold solution contains exactly one literal \\boxed marker, "
+            "well-formed and non-empty; strip outer whitespace then full-match "
+            "number := -?digits(.digits)?(\\%)? or fraction := -?\\frac{digits}{digits}; "
+            "digits := [0-9]+; numbers parsed with decimal.Decimal, percentages divided "
+            "by 100; both paths canonicalized with fractions.Fraction; parse failures "
+            "including zero denominators are invalid"
         ),
         "source_train": _cohort_summary(annotated_train),
         "train": _cohort_summary(train_df),
         "dev": _cohort_summary(dev_df),
         "test": _cohort_summary(test_df),
+        "combined": _cohort_summary(
+            pd.concat([annotated_train, annotated_test], ignore_index=True)
+        ),
     }
     manifest: dict[str, Any] = {
         "raw": {
@@ -557,6 +543,6 @@ def prepare_datasets(
         ("dev", dev_df),
         ("test", test_df),
     ):
-        eligible = int(frame["rational_eligible"].sum())
+        eligible = int(frame["numeric_eligible"].sum())
         print(f"- {COHORT_NAME} {name}: {eligible}/{len(frame)} ({eligible / len(frame):.2%})")
     print(f"- manifest: {manifest_path}")

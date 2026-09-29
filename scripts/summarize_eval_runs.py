@@ -31,7 +31,7 @@ def main() -> None:
     detailed = {}
     for metrics_path in root.glob("*/metrics.json"):
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        if metrics.get("verifier") != "exact-rational-v1":
+        if metrics.get("verifier") != "boxed-numeric-v1":
             raise SystemExit(
                 f"Unsupported or legacy verifier in {metrics_path}: "
                 f"{metrics.get('verifier')!r}"
@@ -44,7 +44,7 @@ def main() -> None:
                 "n": metrics["num_examples"],
                 "accuracy": metrics["accuracy"],
                 "boxed_output_rate": metrics["boxed_output_rate"],
-                "rational_output_rate": metrics["rational_output_rate"],
+                "numeric_output_rate": metrics["numeric_output_rate"],
             }
         )
         detailed[name] = metrics
@@ -63,7 +63,7 @@ def main() -> None:
                 "n",
                 "accuracy",
                 "boxed_output_rate",
-                "rational_output_rate",
+                "numeric_output_rate",
             ],
         )
         writer.writeheader()
@@ -73,7 +73,7 @@ def main() -> None:
     json_path.write_text(
         json.dumps(
             {
-                "verifier": "exact-rational-v1",
+                "verifier": "boxed-numeric-v1",
                 "rows": rows,
                 "metrics": {row["model"]: detailed[row["model"]] for row in rows},
             },
@@ -91,7 +91,7 @@ def main() -> None:
             f"{row['correct']}/{row['n']} "
             f"accuracy={row['accuracy']:.2%} "
             f"boxed={row['boxed_output_rate']:.2%} "
-            f"rational={row['rational_output_rate']:.2%}"
+            f"numeric={row['numeric_output_rate']:.2%}"
         )
     print(f"- CSV:  {csv_path}")
     print(f"- JSON: {json_path}")

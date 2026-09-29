@@ -3,7 +3,7 @@ from __future__ import annotations
 from fractions import Fraction
 from typing import Any
 
-from posttrain_math.answers import extract_final_boxed_rational
+from posttrain_math.answers import extract_final_boxed_numeric
 
 
 def completion_text(completion: Any) -> str:
@@ -23,24 +23,24 @@ def completion_text(completion: Any) -> str:
     return str(completion)
 
 
-def score_exact_rational_completion(
+def score_boxed_numeric_completion(
     completion: Any,
     numerator: int,
     denominator: int,
 ) -> float:
-    """Return the exact-rational-v1 binary terminal reward for one completion."""
+    """Return the boxed-numeric-v1 binary terminal reward for one completion."""
     denominator = int(denominator)
     if denominator == 0:
         raise RuntimeError("RL dataset contains a zero gold denominator.")
     gold = Fraction(int(numerator), denominator)
-    prediction = extract_final_boxed_rational(completion_text(completion))
+    prediction = extract_final_boxed_numeric(completion_text(completion))
     return float(prediction == gold)
 
 
-def make_exact_rational_reward():
-    """Build the callable reward shared by all exact-rational-v1 RL backends."""
+def make_boxed_numeric_reward():
+    """Build the callable reward shared by all boxed-numeric-v1 RL backends."""
 
-    def exact_rational_reward(
+    def boxed_numeric_reward(
         completions,
         gt_numerator,
         gt_denominator,
@@ -48,7 +48,7 @@ def make_exact_rational_reward():
     ) -> list[float]:
         del kwargs
         return [
-            score_exact_rational_completion(completion, numerator, denominator)
+            score_boxed_numeric_completion(completion, numerator, denominator)
             for completion, numerator, denominator in zip(
                 completions,
                 gt_numerator,
@@ -57,5 +57,5 @@ def make_exact_rational_reward():
             )
         ]
 
-    exact_rational_reward.__name__ = "exact_rational_reward"
-    return exact_rational_reward
+    boxed_numeric_reward.__name__ = "boxed_numeric_reward"
+    return boxed_numeric_reward

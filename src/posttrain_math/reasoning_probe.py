@@ -12,9 +12,9 @@ import torch
 
 from posttrain_math.artifacts import staged_adapter_for_local_training
 from posttrain_math.prompting import PROMPT_STRATEGIES
-from posttrain_math.rewards import score_exact_rational_completion
+from posttrain_math.rewards import score_boxed_numeric_completion
 from posttrain_math.rl_common import (
-    build_exact_rational_rl_dataset,
+    build_boxed_numeric_rl_dataset,
     git_commit,
     load_sft_adapter,
     resolve_rl_precision,
@@ -183,7 +183,7 @@ def _load_selection_contract(
     expected = {
         "probe": "prompt-success-v1",
         "split": split,
-        "cohort": "exact-rational-v1",
+        "cohort": "boxed-numeric-v1",
         "prompt": prompt_name,
         "max_completion_length": max_completion_length,
     }
@@ -266,7 +266,7 @@ def probe_prompt_success(
             staged_model=staged_model,
             precision=precision,
         )
-        dataset, stats = build_exact_rational_rl_dataset(
+        dataset, stats = build_boxed_numeric_rl_dataset(
             data_dir=data_dir,
             tokenizer=tokenizer,
             prompt_name=prompt_name,
@@ -300,7 +300,7 @@ def probe_prompt_success(
             for rollout_index, completion_ids in enumerate(completions):
                 completion = _decode(tokenizer, completion_ids)
                 reward = int(
-                    score_exact_rational_completion(
+                    score_boxed_numeric_completion(
                         completion,
                         int(record["gt_numerator"]),
                         int(record["gt_denominator"]),
@@ -345,7 +345,7 @@ def probe_prompt_success(
             "base_model_source": base_source,
             "data_dir": str(data_dir),
             "split": split,
-            "cohort": "exact-rational-v1",
+            "cohort": "boxed-numeric-v1",
             "prompt": prompt_name,
             "data": stats,
             "rollouts": rollouts,
@@ -436,7 +436,7 @@ def probe_prefix_values(
             staged_model=staged_model,
             precision=precision,
         )
-        dataset, stats = build_exact_rational_rl_dataset(
+        dataset, stats = build_boxed_numeric_rl_dataset(
             data_dir=data_dir,
             tokenizer=tokenizer,
             prompt_name=prompt_name,
@@ -510,7 +510,7 @@ def probe_prefix_values(
                     continue
                 original_text = _decode(tokenizer, sampled)
                 original_reward = int(
-                    score_exact_rational_completion(
+                    score_boxed_numeric_completion(
                         original_text,
                         int(record["gt_numerator"]),
                         int(record["gt_denominator"]),
@@ -569,7 +569,7 @@ def probe_prefix_values(
                     for branch_index, completion_ids in enumerate(branches):
                         completion = _decode(tokenizer, completion_ids)
                         reward = int(
-                            score_exact_rational_completion(
+                            score_boxed_numeric_completion(
                                 completion,
                                 int(record["gt_numerator"]),
                                 int(record["gt_denominator"]),
@@ -616,7 +616,7 @@ def probe_prefix_values(
             "probe": "mc-prefix-value-v1",
             "runtime": _runtime_provenance(),
             "definition": (
-                "V_hat(prefix) = mean exact-rational-v1 terminal reward over "
+                "V_hat(prefix) = mean boxed-numeric-v1 terminal reward over "
                 "fresh continuations sampled from that textual prefix"
             ),
             "claim_boundary": (
@@ -628,7 +628,7 @@ def probe_prefix_values(
             "base_model_source": base_source,
             "data_dir": str(data_dir),
             "split": split,
-            "cohort": "exact-rational-v1",
+            "cohort": "boxed-numeric-v1",
             "prompt": prompt_name,
             "data": stats,
             "selection": {

@@ -7,7 +7,7 @@ import pytest
 
 from posttrain_math.data import (
     ORIGINAL_COLUMNS,
-    annotate_rational_cohort,
+    annotate_numeric_cohort,
     split_raw_train,
 )
 
@@ -28,12 +28,13 @@ def make_dataset() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=ORIGINAL_COLUMNS)
 
 
-def test_annotate_rational_cohort() -> None:
+@pytest.mark.parametrize("answer", [r"\frac{6}{8}", "0.7500", r"75\%"])
+def test_annotate_numeric_cohort(answer: str) -> None:
     df = pd.DataFrame(
         [
             {
                 "problem": "a",
-                "solution": r"\boxed{6/8}",
+                "solution": rf"\boxed{{{answer}}}",
                 "type": "Algebra",
                 "level": "Level 1",
             },
@@ -46,16 +47,55 @@ def test_annotate_rational_cohort() -> None:
         ],
         columns=ORIGINAL_COLUMNS,
     )
-    result = annotate_rational_cohort(df)
-    assert result["rational_eligible"].tolist() == [True, False]
-    assert result.iloc[0]["gt_boxed"] == "6/8"
+    result = annotate_numeric_cohort(df)
+    assert result["numeric_eligible"].tolist() == [True, False]
+    assert result.iloc[0]["gt_boxed"] == answer
     assert int(result.iloc[0]["gt_numerator"]) == 3
     assert int(result.iloc[0]["gt_denominator"]) == 4
-    assert result.iloc[1]["rational_exclusion"] == "non_rational_boxed"
+    assert result.iloc[1]["numeric_exclusion"] == "non_numeric_boxed"
+
+
+def test_prepare_numeric_metadata_and_cohort_audit(tmp_path: Path, monkeypatch) -> None:
+    import posttrain_math.data as data_module
+
+    train = make_dataset()
+    train["solution"] = [r"\boxed{12.5\%}", r"\boxed{1/8}"] * 20
+    test = make_dataset()
+    test["problem"] = "test " + test["problem"]
+    test["solution"] = [r"\boxed{\frac{2}{16}}", r"\boxed{\frac{1}{0}}"] * 20
+    train_path, test_path = tmp_path / "raw_train.parquet", tmp_path / "raw_test.parquet"
+    train.to_parquet(train_path, index=False)
+    test.to_parquet(test_path, index=False)
+    monkeypatch.setattr(data_module, "EXPECTED_RAW_TRAIN_ROWS", len(train))
+    monkeypatch.setattr(data_module, "EXPECTED_RAW_TEST_ROWS", len(test))
+    output = tmp_path / "processed"
+    data_module.prepare_datasets(train_path, test_path, output, seed=42, dev_ratio=0.2)
+
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert all(manifest["invariants"].values())
+    cohort = manifest["cohort"]
+    assert cohort["name"] == "boxed-numeric-v1"
+    assert cohort["source_train"]["eligible_rows"] == 20
+    assert cohort["test"]["eligible_rows"] == 20
+    assert cohort["combined"]["source_rows"] == 80
+    assert cohort["combined"]["eligible_rows"] == 40
+    assert cohort["combined"]["retention"] == 0.5
+    assert cohort["combined"]["exclusion_counts"] == {
+        "non_numeric_boxed": 20,
+        "zero_denominator": 20,
+    }
+    assert cohort["train"]["eligible_rows"] + cohort["dev"]["eligible_rows"] == 20
+    for split in ("train", "dev", "test"):
+        frame = pd.read_parquet(output / f"{split}.parquet")
+        assert set(frame.columns) == set(ORIGINAL_COLUMNS + data_module.COHORT_COLUMNS)
+        eligible = frame[frame["numeric_eligible"]]
+        assert eligible["gt_numerator"].eq(1).all()
+        assert eligible["gt_denominator"].eq(8).all()
+        assert eligible["numeric_exclusion"].isna().all()
 
 
 def test_split_is_deterministic_and_disjoint() -> None:
-    df = annotate_rational_cohort(make_dataset())
+    df = annotate_numeric_cohort(make_dataset())
     train1, dev1 = split_raw_train(df, seed=42, dev_ratio=0.2)
     train2, dev2 = split_raw_train(df, seed=42, dev_ratio=0.2)
     pd.testing.assert_frame_equal(train1, train2)

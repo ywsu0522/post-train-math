@@ -1,7 +1,7 @@
 [project]
 name = "posttrain-math"
 version = "0.1.0"
-description = "Reproducible MATH data preparation, OLMo post-training, exact-rational evaluation, and RLVR."
+description = "Reproducible MATH data preparation, OLMo post-training, boxed-numeric evaluation, and RLVR."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

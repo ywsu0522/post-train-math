@@ -98,7 +98,7 @@ def load_sft_adapter(
     return model, tokenizer, base_model_path
 
 
-def build_exact_rational_rl_dataset(
+def build_boxed_numeric_rl_dataset(
     *,
     data_dir: Path,
     tokenizer,
@@ -107,7 +107,7 @@ def build_exact_rational_rl_dataset(
     limit_prompts: int | None,
     split: str = "train",
 ) -> tuple[Dataset, dict[str, int]]:
-    """Build the shared exact-rational-v1 dataset for RL and diagnostics."""
+    """Build the shared boxed-numeric-v1 dataset for RL and diagnostics."""
     if max_prompt_length <= 0:
         raise ValueError("max_prompt_length must be positive.")
     if split not in {"train", "dev", "test"}:
@@ -122,7 +122,7 @@ def build_exact_rational_rl_dataset(
         "problem",
         "type",
         "level",
-        "rational_eligible",
+        "numeric_eligible",
         "gt_numerator",
         "gt_denominator",
     }
@@ -133,7 +133,7 @@ def build_exact_rational_rl_dataset(
             "Re-run `posttrain-math data prepare`."
         )
 
-    cohort_df = df[df["rational_eligible"].astype(bool)].copy()
+    cohort_df = df[df["numeric_eligible"].astype(bool)].copy()
     formatter = get_prompt_formatter(prompt_name)
     records: list[dict[str, str | int]] = []
     overlong_prompt = 0
@@ -142,7 +142,7 @@ def build_exact_rational_rl_dataset(
         numerator = int(row["gt_numerator"])
         denominator = int(row["gt_denominator"])
         if denominator == 0:
-            raise RuntimeError("Prepared rational cohort contains a zero denominator.")
+            raise RuntimeError("Prepared numeric cohort contains a zero denominator.")
 
         prompt = formatter(str(row["problem"]))
         prompt_length = len(
@@ -171,7 +171,7 @@ def build_exact_rational_rl_dataset(
 
     if not records:
         raise ValueError(
-            f"No exact-rational-v1 {split} prompts remain after filtering."
+            f"No boxed-numeric-v1 {split} prompts remain after filtering."
         )
 
     stats = {

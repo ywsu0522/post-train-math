@@ -1,3 +1,4 @@
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -18,8 +19,8 @@ class FakeGenerator:
         assert len(prompts) == 2
         assert max_new_tokens == 128
         assert do_sample is False
-        yield r"Answer: \boxed{2/2}"
-        yield r"Answer: \boxed{0.5}"
+        yield r"Answer: \boxed{100\%}"
+        yield r"First: \boxed{0.5}; final: \boxed{1/2}"
 
     def generate(
         self,
@@ -47,7 +48,7 @@ def fake_prompt(problem: str) -> str:
     return f"Problem: {problem}"
 
 
-def test_evaluation_uses_fixed_rational_cohort_and_grouped_accuracy(
+def test_evaluation_uses_fixed_numeric_cohort_and_grouped_accuracy(
     tmp_path: Path,
 ) -> None:
     data_dir = tmp_path / "data"
@@ -55,14 +56,14 @@ def test_evaluation_uses_fixed_rational_cohort_and_grouped_accuracy(
     df = pd.DataFrame(
         {
             "problem": ["1?", "1/2?", "unscorable"],
-            "solution": [r"\boxed{1}", r"\boxed{1/2}", r"\boxed{\sqrt{2}}"],
+            "solution": [r"\boxed{1}", r"\boxed{\frac{1}{2}}", r"\boxed{\sqrt{2}}"],
             "type": ["Algebra", "Geometry", "Algebra"],
             "level": ["Level 1", "Level 2", "Level 5"],
-            "gt_boxed": ["1", "1/2", r"\sqrt{2}"],
+            "gt_boxed": ["1", r"\frac{1}{2}", r"\sqrt{2}"],
             "gt_numerator": pd.array([1, 1, None], dtype="Int64"),
             "gt_denominator": pd.array([1, 2, None], dtype="Int64"),
-            "rational_eligible": [True, True, False],
-            "rational_exclusion": [None, None, "non_rational_boxed"],
+            "numeric_eligible": [True, True, False],
+            "numeric_exclusion": [None, None, "non_numeric_boxed"],
         }
     )
     df.to_parquet(data_dir / "dev.parquet", index=False)
@@ -77,7 +78,7 @@ def test_evaluation_uses_fixed_rational_cohort_and_grouped_accuracy(
         max_new_tokens=128,
     )
 
-    assert metrics["verifier"] == "exact-rational-v1"
+    assert metrics["verifier"] == "boxed-numeric-v1"
     assert metrics["cohort"] == {
         "source_rows": 3,
         "eligible_rows": 2,
@@ -89,7 +90,15 @@ def test_evaluation_uses_fixed_rational_cohort_and_grouped_accuracy(
     assert metrics["num_correct"] == 1
     assert metrics["accuracy"] == 0.5
     assert metrics["boxed_output_rate"] == 1.0
-    assert metrics["rational_output_rate"] == 0.5
+    assert metrics["numeric_output_rate"] == 0.5
+    assert metrics["num_pred_numeric"] == 1
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "run" / "predictions.jsonl").read_text().splitlines()
+    ]
+    assert [row["prediction_numeric"] for row in records] == [True, False]
+    assert records[0]["pred_numerator"] == records[0]["pred_denominator"] == 1
+    assert records[1]["pred_numerator"] is None
     assert metrics["accuracy_by_level"]["Level 1"]["accuracy"] == 1.0
     assert metrics["accuracy_by_level"]["Level 2"]["accuracy"] == 0.0
     assert metrics["accuracy_by_type"]["Algebra"]["accuracy"] == 1.0

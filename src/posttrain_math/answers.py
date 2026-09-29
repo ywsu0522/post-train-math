@@ -2,16 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal, DecimalException, localcontext
 from fractions import Fraction
 
-_INTEGER_RE = re.compile(r"^[+-]?[0-9]+$")
-_SLASH_FRACTION_RE = re.compile(
-    r"^([+-]?[0-9]+)\s*/\s*([+-]?[0-9]+)$"
-)
+_NUMBER_RE = re.compile(r"(-?[0-9]+(?:\.[0-9]+)?)(\\%)?")
 _LATEX_FRACTION_RE = re.compile(
-    r"^([+-]?)\s*\\frac\s*"
-    r"\{\s*([+-]?[0-9]+)\s*\}\s*"
-    r"\{\s*([+-]?[0-9]+)\s*\}$"
+    r"(-?)\\frac\{([0-9]+)\}\{([0-9]+)\}"
 )
 
 
@@ -25,7 +21,7 @@ class BoxedScan:
 
 
 @dataclass(frozen=True)
-class RationalGold:
+class NumericGold:
     eligible: bool
     gt_boxed: str | None
     numerator: int | None
@@ -151,71 +147,76 @@ def extract_final_boxed(text: str) -> str | None:
     return content if status == "valid" else None
 
 
-def _parse_exact_rational_with_reason(
+def _parse_boxed_numeric_with_reason(
     text: str | None,
 ) -> tuple[Fraction | None, str | None]:
     if not isinstance(text, str):
-        return None, "non_rational_boxed"
+        return None, "non_numeric_boxed"
 
     value = text.strip()
     if not value:
-        return None, "non_rational_boxed"
+        return None, "non_numeric_boxed"
 
-    if _INTEGER_RE.fullmatch(value):
-        return Fraction(int(value), 1), None
+    try:
+        number_match = _NUMBER_RE.fullmatch(value)
+        if number_match is not None:
+            number = Decimal(number_match.group(1))
+            if number_match.group(2):
+                # Decimal construction is exact; division also needs enough
+                # precision to preserve every input digit, regardless of the
+                # caller's current Decimal precision.
+                with localcontext() as context:
+                    context.prec = max(1, len(number.as_tuple().digits))
+                    number /= 100
+            return Fraction(number), None
 
-    slash_match = _SLASH_FRACTION_RE.fullmatch(value)
-    if slash_match is not None:
-        numerator = int(slash_match.group(1))
-        denominator = int(slash_match.group(2))
-        if denominator == 0:
-            return None, "zero_denominator"
-        return Fraction(numerator, denominator), None
+        latex_match = _LATEX_FRACTION_RE.fullmatch(value)
+        if latex_match is not None:
+            outer_sign = -1 if latex_match.group(1) == "-" else 1
+            numerator = outer_sign * int(latex_match.group(2))
+            denominator = int(latex_match.group(3))
+            return Fraction(numerator, denominator), None
+    except ZeroDivisionError:
+        return None, "zero_denominator"
+    except (ValueError, DecimalException):
+        return None, "non_numeric_boxed"
 
-    latex_match = _LATEX_FRACTION_RE.fullmatch(value)
-    if latex_match is not None:
-        outer_sign = -1 if latex_match.group(1) == "-" else 1
-        numerator = outer_sign * int(latex_match.group(2))
-        denominator = int(latex_match.group(3))
-        if denominator == 0:
-            return None, "zero_denominator"
-        return Fraction(numerator, denominator), None
-
-    return None, "non_rational_boxed"
+    return None, "non_numeric_boxed"
 
 
-def parse_exact_rational(text: str | None) -> Fraction | None:
-    """Parse the exact-rational-v1 answer grammar.
+def parse_boxed_numeric(text: str | None) -> Fraction | None:
+    """Parse the boxed-numeric-v1 answer grammar.
 
-    Accepted forms are signed integers, ``a/b``, and LaTeX ``\\frac{a}{b}``
-    with an optional sign before ``\\frac``. Decimal, symbolic, unit-bearing,
-    radical, tuple, interval and prose answers are intentionally rejected.
+    Strip outer whitespace, then full-match a number (optional minus, digits,
+    optional decimal digits, optional ``\\%``) or ``-?\\frac{digits}{digits}``.
+    Numbers use Decimal, percentages divide by 100, and both paths produce
+    canonical Fractions. Parse failures, including zero denominators, are invalid.
     """
-    value, _ = _parse_exact_rational_with_reason(text)
+    value, _ = _parse_boxed_numeric_with_reason(text)
     return value
 
 
-def classify_exact_rational_solution(solution: str) -> RationalGold:
-    """Classify a gold MATH solution for the exact-rational-v1 cohort."""
+def classify_boxed_numeric_solution(solution: str) -> NumericGold:
+    """Classify a gold MATH solution for the boxed-numeric-v1 cohort."""
     scan = scan_boxed(solution)
 
     if scan.marker_count == 0:
-        return RationalGold(False, None, None, None, "no_boxed")
+        return NumericGold(False, None, None, None, "no_boxed")
     if scan.marker_count > 1:
-        return RationalGold(False, None, None, None, "multiple_boxed")
+        return NumericGold(False, None, None, None, "multiple_boxed")
     if scan.empty_count:
-        return RationalGold(False, None, None, None, "empty_boxed")
+        return NumericGold(False, None, None, None, "empty_boxed")
     if scan.unbraced_count or scan.malformed_count:
-        return RationalGold(False, None, None, None, "malformed_boxed")
+        return NumericGold(False, None, None, None, "malformed_boxed")
     if len(scan.valid_contents) != 1:
-        return RationalGold(False, None, None, None, "malformed_boxed")
+        return NumericGold(False, None, None, None, "malformed_boxed")
 
     content = scan.valid_contents[0]
-    fraction, reason = _parse_exact_rational_with_reason(content)
+    fraction, reason = _parse_boxed_numeric_with_reason(content)
     if fraction is None:
-        return RationalGold(False, content, None, None, reason)
+        return NumericGold(False, content, None, None, reason)
 
-    return RationalGold(
+    return NumericGold(
         eligible=True,
         gt_boxed=content,
         numerator=fraction.numerator,
@@ -224,11 +225,11 @@ def classify_exact_rational_solution(solution: str) -> RationalGold:
     )
 
 
-def extract_final_boxed_rational(text: str) -> Fraction | None:
-    return parse_exact_rational(extract_final_boxed(text))
+def extract_final_boxed_numeric(text: str) -> Fraction | None:
+    return parse_boxed_numeric(extract_final_boxed(text))
 
 
-def verify_exact_rational(
+def verify_boxed_numeric(
     completion: str,
     *,
     numerator: int,
@@ -236,5 +237,5 @@ def verify_exact_rational(
 ) -> bool:
     if denominator == 0:
         raise ValueError("Gold denominator must be non-zero.")
-    prediction = extract_final_boxed_rational(completion)
+    prediction = extract_final_boxed_numeric(completion)
     return prediction == Fraction(numerator, denominator)
