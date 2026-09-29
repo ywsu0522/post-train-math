@@ -33,6 +33,7 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
+from posttrain_math.answers import normalize_boxed_numeric_gold_solution
 from posttrain_math.data import COHORT_NAME
 from posttrain_math.distributed import (
     get_distributed_context,
@@ -144,7 +145,7 @@ def _encode_split(
             tokenizer,
             row_id=i,
             problem=str(row.problem),
-            solution=str(row.solution),
+            solution=normalize_boxed_numeric_gold_solution(str(row.solution)),
             prompt_formatter=prompt_formatter,
         )
         for i, row in enumerate(df.itertuples(index=False))

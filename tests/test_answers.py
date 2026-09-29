@@ -8,6 +8,7 @@ from posttrain_math.answers import (
     classify_boxed_numeric_solution,
     extract_final_boxed,
     extract_final_boxed_numeric,
+    normalize_boxed_numeric_gold_solution,
     parse_boxed_numeric,
     verify_boxed_numeric,
 )
@@ -127,6 +128,18 @@ def test_gold_cohort_requires_exactly_one_boxed_marker() -> None:
     assert decimal.eligible
     assert decimal.gt_boxed == r"50\%"
     assert decimal.fraction == Fraction(1, 2)
+
+
+def test_normalize_boxed_numeric_gold_solution_for_sft() -> None:
+    raw = "Reasoning. \\boxed \n {  \\frac{2}{4}  } trailing."
+    assert normalize_boxed_numeric_gold_solution(raw) == (
+        r"Reasoning. \boxed{\frac{2}{4}} trailing."
+    )
+
+    with pytest.raises(ValueError, match="not eligible"):
+        normalize_boxed_numeric_gold_solution(
+            r"Reasoning. \boxed{\sqrt{2}}"
+        )
 
 
 def test_gold_cohort_exclusion_reasons() -> None:

@@ -1,9 +1,11 @@
 import os
 
+import pandas as pd
 import pytest
 
 from posttrain_math.training import (
     IGNORE_INDEX,
+    _encode_split,
     _resolve_precision,
     build_sft_config,
     encode_sft_example,
@@ -109,6 +111,30 @@ def test_prompt_has_no_supervised_position() -> None:
     )
 
     assert supervised_prompt == 0
+
+
+def test_sft_split_normalizes_gold_box_serialization(tmp_path) -> None:
+    pd.DataFrame(
+        {
+            "problem": ["half?", "excluded"],
+            "solution": [
+                "Reasoning. \\boxed \n {  \\frac{2}{4}  }",
+                r"Reasoning. \boxed{\sqrt{2}}",
+            ],
+            "numeric_eligible": [True, False],
+        }
+    ).to_parquet(tmp_path / "train.parquet", index=False)
+
+    examples = _encode_split(
+        tmp_path,
+        "train",
+        tokenizer=FakeTokenizer(),
+        prompt_formatter=fake_prompt,
+    )
+
+    assert len(examples) == 1
+    assert examples[0].completion == r"Reasoning. \boxed{\frac{2}{4}}"
+
 
 def test_precision_dtype_mapping() -> None:
     import torch

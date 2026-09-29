@@ -225,6 +225,36 @@ def classify_boxed_numeric_solution(solution: str) -> NumericGold:
     )
 
 
+def normalize_boxed_numeric_gold_solution(solution: str) -> str:
+    """Normalize the single eligible gold box to the exact SFT/FSM spelling.
+
+    Preserve all reasoning text and the accepted boxed-content serialization,
+    but rewrite optional whitespace between ``\\boxed`` and ``{`` and outer
+    whitespace inside the box as exactly ``\\boxed{<gt_boxed>}``.
+    """
+    classification = classify_boxed_numeric_solution(solution)
+    if not classification.eligible or classification.gt_boxed is None:
+        raise ValueError("Gold solution is not eligible for boxed-numeric-v1.")
+
+    marker = r"\boxed"
+    start = solution.find(marker)
+    if start < 0:
+        raise AssertionError("Eligible boxed-numeric solution has no marker.")
+
+    open_index = start + len(marker)
+    while open_index < len(solution) and solution[open_index].isspace():
+        open_index += 1
+    if open_index >= len(solution) or solution[open_index] != "{":
+        raise AssertionError("Eligible boxed-numeric solution has no opening brace.")
+
+    close_index = _find_matching_brace(solution, open_index)
+    if close_index is None:
+        raise AssertionError("Eligible boxed-numeric solution has no closing brace.")
+
+    normalized_box = rf"\boxed{{{classification.gt_boxed}}}"
+    return solution[:start] + normalized_box + solution[close_index + 1 :]
+
+
 def extract_final_boxed_numeric(text: str) -> Fraction | None:
     return parse_boxed_numeric(extract_final_boxed(text))
 

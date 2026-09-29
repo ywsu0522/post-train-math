@@ -87,16 +87,26 @@ def test_prospective_masking_across_marker_and_token_boundaries(tokenizer):
         assert torch.isneginf(logits[tokenizer.convert_tokens_to_ids(bad)])
 
 
+def test_exact_boxed_marker_commits_to_open_brace(tokenizer):
+    assert consume(0, b"\\boxed ") == INVALID
+    logits = masked(tokenizer, r"\boxed")
+    assert torch.isfinite(logits[tokenizer.convert_tokens_to_ids("{")])
+    assert torch.isneginf(logits[tokenizer.convert_tokens_to_ids("x")])
+    assert torch.isneginf(logits[tokenizer.convert_tokens_to_ids(" ")])
+    assert torch.isneginf(logits[tokenizer.convert_tokens_to_ids("}")])
+    assert torch.isneginf(logits[tokenizer.eos_token_id])
+
+
 def test_only_generated_marker_activates_masking_and_closure_restores_freedom(tokenizer):
     for prefix in ("reasoning", r"\boxed{1} trailing "):
         logits = masked(tokenizer, prefix, prompt=r"System: output \boxed{")
         assert torch.isfinite(logits[tokenizer.eos_token_id])
         assert torch.isfinite(logits[tokenizer.convert_tokens_to_ids("x")])
-    for prefix in (r"\boxed{", r"\boxed{-", r"\boxed{1.", r"\boxed{\frac{1}{0}"):
+    for prefix in (r"\boxed", r"\boxed{", r"\boxed{-", r"\boxed{1.", r"\boxed{\frac{1}{0}"):
         logits = masked(tokenizer, prefix)
         assert torch.isneginf(logits[tokenizer.eos_token_id])
         assert torch.isneginf(logits[tokenizer.convert_tokens_to_ids("x")])
-    for prefix in (r"\boxed{", r"\boxed{-", r"\boxed{1."):
+    for prefix in (r"\boxed", r"\boxed{", r"\boxed{-", r"\boxed{1."):
         assert torch.isneginf(masked(tokenizer, prefix)[tokenizer.convert_tokens_to_ids("}")])
     assert torch.isfinite(masked(tokenizer, r"\boxed{1")[tokenizer.convert_tokens_to_ids("}")])
 

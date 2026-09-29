@@ -8,8 +8,10 @@ from transformers import LogitsProcessor
 
 MARKER = b"\\boxed{"
 INVALID = -1
-# States 0..6 search for the literal marker outside a box.
+# States 0..5 search for the marker. State 6 means literal ``\boxed`` has
+# already been generated, so the next byte is committed to ``{``.
 START, SIGN, INTEGER, DOT, DECIMAL, PERCENT_SLASH, PERCENT = range(7, 14)
+BOXED = START - 1
 FRAC_F, FRAC_R, FRAC_A, FRAC_C, FRAC_OPEN = range(14, 19)
 NUM_START, NUM_DIGITS, DEN_OPEN, DEN_START, DEN_DIGITS, FRAC_END = range(19, 25)
 ACCEPTING = {INTEGER, DECIMAL, PERCENT, FRAC_END}
@@ -22,6 +24,8 @@ def advance(state: int, value: int) -> int:
     if state < START:
         if value == MARKER[state]:
             return state + 1
+        if state == BOXED:
+            return INVALID
         return 1 if value == MARKER[0] else 0
     digit = ord("0") <= value <= ord("9")
     if state in (START, SIGN):
@@ -114,7 +118,8 @@ def _token_bytes(tokenizer) -> list[bytes | None]:
 class BoxedNumericLogitsProcessor(LogitsProcessor):
     """Mask tokens whose entire byte sequence takes the FSM into failure.
 
-    Detect markers in generated tokens only. Outside boxes special tokens retain
+    Detect literal ``\\boxed`` in generated tokens only and then force ``{``
+    before applying the answer grammar. Outside boxes special tokens retain
     their normal behavior; inside, all special tokens (including EOS) are masked.
     No box is forced, repaired, or used to terminate the completion.
     """
