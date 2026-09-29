@@ -1,62 +1,32 @@
+import pytest
+
 from posttrain_math.prompting import (
     PROMPT_STRATEGIES,
-    format_boxed_cot_prompt,
+    SYSTEM_PROMPT,
     format_boxed_prompt,
-    format_plain_prompt,
     get_prompt_formatter,
+    prompt_metadata,
 )
 
 
-def test_plain_prompt() -> None:
-    prompt = format_plain_prompt(
-        "What is 1 + 1?"
-    )
-
-    assert "What is 1 + 1?" in prompt
-    assert r"\boxed{...}" not in prompt
-    assert "Think step-by-step" not in prompt
-
-
-def test_boxed_prompt() -> None:
-    prompt = format_boxed_prompt(
-        "What is 1 + 1?"
-    )
-
-    assert "What is 1 + 1?" in prompt
+def test_shared_system_prompt_and_serialization() -> None:
+    prompt = format_boxed_prompt(" What is 1 + 1? ")
+    assert prompt == f"System:\n{SYSTEM_PROMPT}\n\nProblem:\nWhat is 1 + 1?\n\nSolution:\n"
     assert r"\boxed{...}" in prompt
-    assert "Think step-by-step" not in prompt
+    assert 'answer := number | fraction' in prompt
+    assert r'number := ["-"] digits ["." digits] ["\%"]' in prompt
+    assert r'fraction := ["-"] "\frac{" digits "}{" digits "}"' in prompt
+    assert set(PROMPT_STRATEGIES) == {"boxed"}
+    assert get_prompt_formatter("boxed") is format_boxed_prompt
+    assert prompt_metadata()["system_prompt"] == SYSTEM_PROMPT
 
 
-def test_boxed_cot_prompt() -> None:
-    prompt = format_boxed_cot_prompt(
-        "What is 1 + 1?"
-    )
-
-    assert "What is 1 + 1?" in prompt
-    assert r"\boxed{...}" in prompt
-    assert "Think step-by-step" in prompt
+@pytest.mark.parametrize("name", ["plain", "boxed-cot", "unknown"])
+def test_alternative_prompt_strategies_are_rejected(name) -> None:
+    with pytest.raises(ValueError, match="Unknown prompt"):
+        get_prompt_formatter(name)
 
 
-def test_prompt_strategies_are_registered() -> None:
-    assert set(PROMPT_STRATEGIES) == {
-        "plain",
-        "boxed",
-        "boxed-cot",
-    }
-
-
-def test_get_prompt_formatter() -> None:
-    assert (
-        get_prompt_formatter("plain")
-        is format_plain_prompt
-    )
-
-    assert (
-        get_prompt_formatter("boxed")
-        is format_boxed_prompt
-    )
-
-    assert (
-        get_prompt_formatter("boxed-cot")
-        is format_boxed_cot_prompt
-    )
+def test_empty_problem_is_rejected() -> None:
+    with pytest.raises(ValueError, match="empty"):
+        format_boxed_prompt("  ")

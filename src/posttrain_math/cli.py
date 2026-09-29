@@ -292,6 +292,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
     )
+    eval_parser.add_argument(
+        "--fsm", choices=("off", "on"), default="off",
+        help="Apply syntax-only token masking inside each literal \\boxed{ marker.",
+    )
+
+    matrix_parser = commands.add_parser("eval-format-matrix")
+    matrix_parser.add_argument("--base-model", type=Path, default=DEFAULT_MODEL)
+    matrix_parser.add_argument("--sft-model", type=Path, required=True)
+    matrix_parser.add_argument("--data-dir", type=Path, default=DEFAULT_PROCESSED_DIR)
+    matrix_parser.add_argument("--output-dir", type=Path, required=True)
+    matrix_parser.add_argument("--split", choices=("dev", "test"), default="dev")
+    matrix_parser.add_argument("--batch-size", type=int, default=1)
+    matrix_parser.add_argument("--max-new-tokens", type=int, default=1024)
+    matrix_parser.add_argument("--limit", type=int, default=None)
 
     # train
     train_parser = commands.add_parser(
@@ -727,13 +741,14 @@ def run_eval(
             "runs/"
             f"eval-{args.model.name}-"
             f"{args.split}-"
-            f"{args.prompt}"
+            f"{args.prompt}-fsm-{args.fsm}"
         )
 
     generator = (
         HFModelRunner.from_pretrained(
             args.model,
             batch_size=args.batch_size,
+            fsm=args.fsm == "on",
         )
     )
 
@@ -948,6 +963,14 @@ def main() -> None:
 
         elif args.command == "eval":
             exit_code = run_eval(args)
+
+        elif args.command == "eval-format-matrix":
+            from posttrain_math.format_matrix import run_format_matrix
+
+            run_format_matrix(**{
+                key: value for key, value in vars(args).items() if key != "command"
+            })
+            exit_code = 0
 
         elif args.command == "train":
             exit_code = run_train(args)

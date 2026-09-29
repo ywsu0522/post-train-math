@@ -33,12 +33,17 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
+from posttrain_math.data import COHORT_NAME
 from posttrain_math.distributed import (
     get_distributed_context,
     resolve_gradient_accumulation,
 )
 from posttrain_math.environment import native_bf16_supported
-from posttrain_math.prompting import PromptFormatter, get_prompt_formatter
+from posttrain_math.prompting import (
+    PromptFormatter,
+    get_prompt_formatter,
+    prompt_metadata,
+)
 
 IGNORE_INDEX = -100
 GIB = 1024**3
@@ -90,10 +95,12 @@ def _load_split(data_dir: Path, split: str) -> pd.DataFrame:
         raise FileNotFoundError(f"Processed split not found: {path}")
 
     df = pd.read_parquet(path)
-    missing = {"problem", "solution"} - set(df.columns)
+    missing = {"problem", "solution", "numeric_eligible"} - set(df.columns)
     if missing:
-        raise ValueError(f"{split}: missing columns {sorted(missing)}")
-    return df
+        raise ValueError(
+            f"{split}: missing columns {sorted(missing)}. Re-run `posttrain-math data prepare`."
+        )
+    return df.loc[df["numeric_eligible"].eq(True)].copy()
 
 
 def encode_sft_example(
@@ -989,6 +996,8 @@ def train_sft(
             "git_commit": _git_commit(),
             "model": str(model_path),
             "prompt": prompt_name,
+            "prompt_contract": prompt_metadata(),
+            "cohort": COHORT_NAME,
             "data_dir": str(data_dir),
             "max_length": max_length,
             "overlong_policy": overlong_policy,

@@ -133,7 +133,7 @@ def build_boxed_numeric_rl_dataset(
             "Re-run `posttrain-math data prepare`."
         )
 
-    cohort_df = df[df["numeric_eligible"].astype(bool)].copy()
+    cohort_df = df[df["numeric_eligible"].eq(True)].copy()
     formatter = get_prompt_formatter(prompt_name)
     records: list[dict[str, str | int]] = []
     overlong_prompt = 0

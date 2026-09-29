@@ -11,7 +11,7 @@ import pandas as pd
 import torch
 
 from posttrain_math.artifacts import staged_adapter_for_local_training
-from posttrain_math.prompting import PROMPT_STRATEGIES
+from posttrain_math.prompting import PROMPT_STRATEGIES, prompt_metadata
 from posttrain_math.rewards import score_boxed_numeric_completion
 from posttrain_math.rl_common import (
     build_boxed_numeric_rl_dataset,
@@ -185,6 +185,7 @@ def _load_selection_contract(
         "split": split,
         "cohort": "boxed-numeric-v1",
         "prompt": prompt_name,
+        "prompt_contract": prompt_metadata(),
         "max_completion_length": max_completion_length,
     }
     mismatches = [
@@ -347,6 +348,7 @@ def probe_prompt_success(
             "split": split,
             "cohort": "boxed-numeric-v1",
             "prompt": prompt_name,
+            "prompt_contract": prompt_metadata(),
             "data": stats,
             "rollouts": rollouts,
             "max_prompt_length": max_prompt_length,
@@ -630,6 +632,7 @@ def probe_prefix_values(
             "split": split,
             "cohort": "boxed-numeric-v1",
             "prompt": prompt_name,
+            "prompt_contract": prompt_metadata(),
             "data": stats,
             "selection": {
                 "path": str(selection_path),

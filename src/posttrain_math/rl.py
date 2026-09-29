@@ -14,7 +14,7 @@ from posttrain_math.distributed import (
     get_distributed_context,
     resolve_gradient_accumulation,
 )
-from posttrain_math.prompting import PROMPT_STRATEGIES
+from posttrain_math.prompting import PROMPT_STRATEGIES, prompt_metadata
 from posttrain_math.rewards import make_boxed_numeric_reward
 from posttrain_math.rl_common import (
     build_boxed_numeric_rl_dataset,
@@ -359,6 +359,7 @@ def train_rl(
         "data_dir": str(data_dir),
         "cohort": "boxed-numeric-v1",
         "prompt": prompt_name,
+        "prompt_contract": prompt_metadata(),
         "data": data_stats,
         "max_steps": max_steps,
         "learning_rate": learning_rate,

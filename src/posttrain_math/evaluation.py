@@ -16,8 +16,9 @@ from posttrain_math.distributed import (
     get_distributed_context,
     init_process_group_if_needed,
 )
+from posttrain_math.fsm import final_box_matches_grammar
 from posttrain_math.modeling import TextGenerator
-from posttrain_math.prompting import PromptFormatter
+from posttrain_math.prompting import PromptFormatter, prompt_metadata
 
 
 def _normalize_optional_string(value: Any) -> str | None:
@@ -181,6 +182,7 @@ def _metrics_from_records(
         "num_gt_boxed": 0,
         "num_pred_boxed": 0,
         "num_pred_numeric": 0,
+        "num_pred_grammar": 0,
         "num_correct": 0,
     }
     by_level: dict[str, dict[str, int]] = {}
@@ -191,6 +193,7 @@ def _metrics_from_records(
         counters["num_gt_boxed"] += int(record["gt_boxed"] is not None)
         counters["num_pred_boxed"] += int(record["pred_boxed"] is not None)
         counters["num_pred_numeric"] += int(bool(record["prediction_numeric"]))
+        counters["num_pred_grammar"] += int(bool(record["prediction_grammar"]))
         counters["num_correct"] += int(bool(record["correct"]))
         _update_group(by_level, str(record["level"]), correct=bool(record["correct"]))
         _update_group(by_type, str(record["type"]), correct=bool(record["correct"]))
@@ -204,6 +207,7 @@ def _metrics_from_records(
     return {
         "split": split,
         "prompt_strategy": prompt_name,
+        "prompt_contract": prompt_metadata(),
         "verifier": "boxed-numeric-v1",
         "generator": generator_metadata,
         "distributed": {
@@ -223,6 +227,7 @@ def _metrics_from_records(
         "gt_boxed_coverage": gt_boxed_coverage,
         "boxed_output_rate": boxed_output_rate,
         "numeric_output_rate": numeric_output_rate,
+        "grammar_output_rate": counters["num_pred_grammar"] / n if n else 0.0,
         "accuracy": accuracy,
         "accuracy_by_level": _finalize_groups(by_level),
         "accuracy_by_type": _finalize_groups(by_type),
@@ -253,6 +258,7 @@ def _print_final_metrics(
     print(f"  accuracy:              {metrics['accuracy']:.2%}")
     print(f"  boxed output rate:     {metrics['boxed_output_rate']:.2%}")
     print(f"  numeric output rate:  {metrics['numeric_output_rate']:.2%}")
+    print(f"  grammar output rate:  {metrics['grammar_output_rate']:.2%}")
     print(f"  inference world size:  {metrics['distributed']['world_size']}")
     _print_group_accuracy("Accuracy by level", metrics["accuracy_by_level"])
     _print_group_accuracy("Accuracy by type", metrics["accuracy_by_type"])
@@ -281,7 +287,7 @@ def evaluate(
     try:
         source_df = load_eval_split(data_dir, split)
         source_rows = len(source_df)
-        eligible_df = source_df[source_df["numeric_eligible"].astype(bool)].copy()
+        eligible_df = source_df[source_df["numeric_eligible"].eq(True)].copy()
         eligible_rows = len(eligible_df)
         excluded_rows = source_rows - eligible_rows
         if eligible_rows == 0:
@@ -371,6 +377,7 @@ def evaluate(
                     "generation": generation,
                     "pred_boxed": pred_boxed,
                     "prediction_numeric": prediction is not None,
+                    "prediction_grammar": final_box_matches_grammar(generation),
                     "pred_numerator": prediction.numerator if prediction is not None else None,
                     "pred_denominator": prediction.denominator if prediction is not None else None,
                     "correct": correct,

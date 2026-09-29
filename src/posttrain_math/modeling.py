@@ -10,11 +10,13 @@ from peft import PeftConfig, PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
+    LogitsProcessorList,
 )
 
 from posttrain_math.artifacts import resolve_local_base_model
 from posttrain_math.distributed import get_distributed_context
 from posttrain_math.environment import native_bf16_supported
+from posttrain_math.fsm import BoxedNumericLogitsProcessor
 
 
 class TextGenerator(Protocol):
@@ -60,6 +62,7 @@ class HFModelRunner:
         batch_size: int,
         rank: int,
         world_size: int,
+        fsm: bool = False,
     ) -> None:
         self.model_path = model_path
         self.model = model
@@ -69,6 +72,10 @@ class HFModelRunner:
         self.batch_size = batch_size
         self.rank = rank
         self.world_size = world_size
+        self.fsm = fsm
+        self.boxed_processor = (
+            BoxedNumericLogitsProcessor(tokenizer, prompt_length=0) if fsm else None
+        )
 
     @classmethod
     def from_pretrained(
@@ -76,6 +83,7 @@ class HFModelRunner:
         model_path: Path,
         *,
         batch_size: int = 1,
+        fsm: bool = False,
     ) -> HFModelRunner:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -150,6 +158,7 @@ class HFModelRunner:
             batch_size=batch_size,
             rank=context.rank,
             world_size=context.world_size,
+            fsm=fsm,
         )
 
     def count_tokens(
@@ -199,9 +208,14 @@ class HFModelRunner:
                 return_tensors="pt",
                 padding=True,
                 truncation=False,
+                add_special_tokens=False,
             )
 
             input_width = encoded["input_ids"].shape[1]
+            processors = LogitsProcessorList()
+            if self.boxed_processor is not None:
+                self.boxed_processor.reset(prompt_length=input_width)
+                processors.append(self.boxed_processor)
 
             encoded = {
                 key: value.to(self.device)
@@ -216,6 +230,9 @@ class HFModelRunner:
                     pad_token_id=self.tokenizer.pad_token_id,
                     eos_token_id=self.tokenizer.eos_token_id,
                     use_cache=True,
+                    logits_processor=processors,
+                    num_beams=1,
+                    num_return_sequences=1,
                 )
 
             continuation_ids = output_ids[:, input_width:]
@@ -223,6 +240,7 @@ class HFModelRunner:
             batch_generations = self.tokenizer.batch_decode(
                 continuation_ids,
                 skip_special_tokens=True,
+                clean_up_tokenization_spaces=False,
             )
 
             if len(batch_generations) != len(batch_prompts):
@@ -261,4 +279,5 @@ class HFModelRunner:
             "batch_size": self.batch_size,
             "rank": self.rank,
             "world_size": self.world_size,
+            "fsm": {"enabled": self.fsm, "grammar": "boxed-numeric-v1"},
         }
