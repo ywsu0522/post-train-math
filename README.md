@@ -19,6 +19,12 @@ rewards correspond to textual intermediate states from which future success is
 actually more likely?** Training remains outcome-only; reasoning-path analysis is
 a separate diagnostic. See [`docs/rl_research.md`](docs/rl_research.md).
 
+The active `codex/boxed-numeric-rl` branch starts directly from `4339742`.
+Its first executable experiment is the [original-SFT RLOO pilot](docs/rloo_pilot.md)
+with a [Colab T4 notebook](docs/rloo_pilot_colab.ipynb). It uses the full numeric
+training cohort and correctness-only reward, with fixed before/after dev evaluation.
+The original research baseline remains on `master`.
+
 ## Reference environment
 
 The reference GPU runtime is Linux x86_64 with:

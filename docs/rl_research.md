@@ -11,6 +11,12 @@ The second question is deliberately narrower than mechanistic interpretability. 
 
 ## Training backend policy
 
+The [first T4 pilot](rloo_pilot.md) uses RLOO from the original one-pass SFT adapter,
+on all eligible MATH training levels/types. It measures actual reward sparsity and
+before/after development accuracy. There is no format-rate admission threshold,
+continued-SFT stage, or reward-based curriculum selection. The matrix below defines
+later estimator comparisons, not three runs required before the first result.
+
 Full 1B training should use maintained trainer implementations rather than project-specific copies of rollout, distributed, optimizer, checkpoint, and mixed-precision machinery. Small reference functions in `posttrain_math.estimators` encode the mathematical semantics we want to verify.
 
 The controlled first-stage matrix is:

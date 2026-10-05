@@ -10,6 +10,7 @@ from typing import Literal
 import torch
 from trl import GRPOConfig, GRPOTrainer, RLOOConfig, RLOOTrainer
 
+from posttrain_math.artifacts import local_model_source, normalize_adapter_artifact
 from posttrain_math.distributed import (
     get_distributed_context,
     resolve_gradient_accumulation,
@@ -263,6 +264,8 @@ def train_rl(
     seed: int,
     limit_prompts: int | None,
     resume_from_checkpoint: Path | None,
+    audit_rollouts: bool = False,
+    stop_after_steps: int | None = None,
 ) -> None:
     contract = algorithm_contract(algorithm)
     _validate_common_args(
@@ -429,12 +432,27 @@ def train_rl(
         print()
 
     trainer_cls = RLOOTrainer if algorithm == "rloo" else GRPOTrainer
+    callbacks = []
+    reward = make_boxed_numeric_reward()
+    if audit_rollouts:
+        if context.world_size != 1:
+            raise ValueError("Durable rollout audit currently supports a single GPU")
+        from posttrain_math.rl_monitoring import RLProgressCallback, RolloutAudit
+
+        audit = RolloutAudit(output_dir, group_size=num_generations,
+                             eos_token_id=tokenizer.eos_token_id, max_tokens=max_completion_length)
+        reward = audit.reward
+        callbacks.append(RLProgressCallback(output_dir, audit, local_model_source(base_model_path) or {},
+                                             stop_after=stop_after_steps))
+    elif stop_after_steps is not None:
+        raise ValueError("stop_after_steps requires rollout audit and checkpoint callbacks")
     trainer = trainer_cls(
         model=model,
-        reward_funcs=make_boxed_numeric_reward(),
+        reward_funcs=reward,
         args=trainer_config,
         train_dataset=train_dataset,
         processing_class=tokenizer,
+        callbacks=callbacks,
     )
     train_result = trainer.train(
         resume_from_checkpoint=(
@@ -444,12 +462,16 @@ def train_rl(
         )
     )
 
+    if trainer.state.global_step < max_steps:
+        print(f"Paused cleanly at step {trainer.state.global_step}; resume the complete checkpoint.", flush=True)
+        return
     final_model_dir = output_dir / "final-model"
     trainer.save_model(str(final_model_dir))
     trainer.accelerator.wait_for_everyone()
 
     if context.is_main_process:
         tokenizer.save_pretrained(final_model_dir)
+        normalize_adapter_artifact(final_model_dir, local_model_source(base_model_path) or {})
         checkpoints = sorted(
             (
                 path.name

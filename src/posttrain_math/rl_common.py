@@ -7,8 +7,9 @@ import pandas as pd
 import torch
 from datasets import Dataset
 from peft import PeftConfig, PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
+from posttrain_math.artifacts import resolve_local_base_model
 from posttrain_math.environment import native_bf16_supported
 from posttrain_math.prompting import get_prompt_formatter
 
@@ -52,7 +53,7 @@ def load_sft_adapter(
     precision: str,
     trainable: bool,
 ):
-    """Load a local staged LoRA adapter without network access."""
+    """Load a local LoRA adapter and its pinned base without network access."""
     adapter_config_path = model_path / "adapter_config.json"
     if not adapter_config_path.is_file():
         raise ValueError(
@@ -61,12 +62,7 @@ def load_sft_adapter(
         )
 
     peft_config = PeftConfig.from_pretrained(model_path, local_files_only=True)
-    base_model_path = Path(peft_config.base_model_name_or_path)
-    if not base_model_path.is_dir():
-        raise FileNotFoundError(
-            "The staged adapter points to a base model directory that is "
-            f"not available locally: {base_model_path}"
-        )
+    base_model_path = resolve_local_base_model(model_path, str(peft_config.base_model_name_or_path))
 
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_path,
@@ -95,6 +91,10 @@ def load_sft_adapter(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
+    model.generation_config = GenerationConfig(
+        eos_token_id=tokenizer.eos_token_id, pad_token_id=tokenizer.pad_token_id,
+    )
+    base_model.generation_config = model.generation_config
     return model, tokenizer, base_model_path
 
 

@@ -22,3 +22,6 @@ models/
 
 # Local experiment outputs, including Trainer checkpoints and final adapters
 runs/
+
+# Local copies of original training artifacts
+post-train-math-backup/
