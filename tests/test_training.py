@@ -4,6 +4,7 @@ import pytest
 
 from posttrain_math.training import (
     IGNORE_INDEX,
+    _load_split,
     _resolve_precision,
     build_sft_config,
     encode_sft_example,
@@ -170,3 +171,55 @@ def test_sft_config_translates_warmup_ratio(tmp_path) -> None:
 
     assert config.warmup_steps == 0.03
     assert config.get_warmup_steps(100) == 3
+
+
+@pytest.mark.parametrize("split", ["train", "dev"])
+def test_sft_split_is_always_numeric_eligible(tmp_path, split) -> None:
+    import pandas as pd
+
+    df = pd.DataFrame(
+        {
+            "problem": [
+                "eligible",
+                "ineligible",
+                "unknown",
+            ],
+            "solution": [
+                r"\boxed{2}",
+                r"\boxed{x}",
+                r"\boxed{3}",
+            ],
+            "numeric_eligible": [
+                True,
+                False,
+                None,
+            ],
+        }
+    )
+
+    df.to_parquet(
+        tmp_path / f"{split}.parquet",
+        index=False,
+    )
+
+    loaded = _load_split(
+        tmp_path,
+        split,
+    )
+
+    assert len(loaded) == 1
+    assert loaded.iloc[0]["problem"] == "eligible"
+    assert loaded["numeric_eligible"].eq(True).all()
+
+
+@pytest.mark.parametrize("split", ["train", "dev"])
+@pytest.mark.parametrize("eligibility", [None, [False, None]])
+def test_sft_split_rejects_missing_or_empty_numeric_cohort(tmp_path, split, eligibility) -> None:
+    import pandas as pd
+
+    frame = pd.DataFrame({"problem": ["a", "b"], "solution": ["x", "y"]})
+    if eligibility is not None:
+        frame["numeric_eligible"] = eligibility
+    frame.to_parquet(tmp_path / f"{split}.parquet", index=False)
+    with pytest.raises(ValueError, match="missing columns.*numeric_eligible|cohort is empty"):
+        _load_split(tmp_path, split)

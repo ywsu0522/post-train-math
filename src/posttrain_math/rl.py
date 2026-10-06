@@ -206,7 +206,6 @@ def build_trainer_config(
         "temperature": temperature,
         "top_p": top_p,
         "top_k": 0,
-        "repetition_penalty": 1.0,
         "beta": beta,
         "disable_dropout": True,
         "use_vllm": False,
@@ -377,7 +376,6 @@ def train_rl(
             "temperature": temperature,
             "top_p": top_p,
             "top_k": 0,
-            "repetition_penalty": 1.0,
         },
         "reward": {
             "verifier": "boxed-numeric-v1",

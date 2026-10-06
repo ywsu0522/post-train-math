@@ -1,4 +1,4 @@
-"""Resumable, single-T4 RLOO pilot from the original SFT adapter."""
+"""Resumable, single-T4 RLOO pilot from a numeric-cohort SFT adapter."""
 from __future__ import annotations
 
 import argparse
@@ -26,8 +26,7 @@ from posttrain_math.rl_sampling import (
     tasks,
 )
 
-CONTRACT = 'numeric-rloo-original-sft-v1'
-INITIAL_SFT_SHA256 = '40272e18f4b5e0491ebe9e2daaa06b892c143a0093a2ac66ac311203cd180bf5'
+CONTRACT = 'numeric-rloo-sft2ep-v1'
 OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens')
 
 
@@ -79,29 +78,97 @@ def make_selection(train, dev, *, token_length, seed: int, dev_size: int = 64, s
 def validate_initial_adapter(adapter: Path) -> None:
     from tokenizers import Tokenizer
 
-    base = Path('models/olmo-2-0425-1b')
-    if file_hash(adapter / 'adapter_model.safetensors') != INITIAL_SFT_SHA256:
-        raise ValueError('Use the original SFT final-model; adapter weights do not match the reviewed original model')
-    config = read_json(adapter / 'adapter_config.json')
-    if config.get('peft_type') != 'LORA':
-        raise ValueError('Pilot requires the original LoRA adapter')
-    expected, actual = read_json(adapter / 'base_model_source.json'), read_json(base / 'source.json')
-    if any(not expected.get(k) or expected[k] != actual.get(k) for k in ('repo_id', 'resolved_commit')):
-        raise ValueError('Adapter/base provenance mismatch')
+    base = Path("models/olmo-2-0425-1b")
+
+    required = (
+        "adapter_model.safetensors",
+        "adapter_config.json",
+        "base_model_source.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+    )
+    missing = [
+        name
+        for name in required
+        if not (adapter / name).is_file()
+    ]
+    if missing:
+        raise ValueError(
+            f"SFT adapter is incomplete; missing: {missing}"
+        )
+
+    config = read_json(adapter / "adapter_config.json")
+    if config.get("peft_type") != "LORA":
+        raise ValueError(
+            "RLOO pilot requires a LoRA SFT adapter"
+        )
+
+    expected = read_json(
+        adapter / "base_model_source.json"
+    )
+    actual = read_json(
+        base / "source.json"
+    )
+    if any(
+        not expected.get(key)
+        or expected[key] != actual.get(key)
+        for key in ("repo_id", "resolved_commit")
+    ):
+        raise ValueError(
+            "Adapter/base provenance mismatch"
+        )
 
     def tokenizer_contract(path):
-        value = json.loads(Tokenizer.from_file(str(path)).to_str())
-        value.pop('padding', None)
-        value.pop('truncation', None)
-        identity = {'type': 'TemplateProcessing', 'single': [{'Sequence': {'id': 'A', 'type_id': 0}}],
-                    'pair': [{'Sequence': {'id': 'A', 'type_id': 0}}, {'Sequence': {'id': 'B', 'type_id': 1}}],
-                    'special_tokens': {}}
-        if value.get('post_processor') == identity:
-            value['post_processor'] = None
+        value = json.loads(
+            Tokenizer.from_file(str(path)).to_str()
+        )
+        value.pop("padding", None)
+        value.pop("truncation", None)
+
+        identity = {
+            "type": "TemplateProcessing",
+            "single": [
+                {
+                    "Sequence": {
+                        "id": "A",
+                        "type_id": 0,
+                    }
+                }
+            ],
+            "pair": [
+                {
+                    "Sequence": {
+                        "id": "A",
+                        "type_id": 0,
+                    }
+                },
+                {
+                    "Sequence": {
+                        "id": "B",
+                        "type_id": 1,
+                    }
+                },
+            ],
+            "special_tokens": {},
+        }
+
+        if value.get("post_processor") == identity:
+            value["post_processor"] = None
+
         return value
 
-    if tokenizer_contract(adapter / 'tokenizer.json') != tokenizer_contract(base / 'tokenizer.json'):
-        raise ValueError('Adapter tokenizer differs from the pinned base tokenizer')
+    if (
+        tokenizer_contract(
+            adapter / "tokenizer.json"
+        )
+        != tokenizer_contract(
+            base / "tokenizer.json"
+        )
+    ):
+        raise ValueError(
+            "Adapter tokenizer differs from "
+            "the pinned base tokenizer"
+        )
 
 
 def prepare(args):
@@ -109,7 +176,7 @@ def prepare(args):
     from tokenizers import Tokenizer
 
     root = args.output_dir
-    print('Checking original SFT weights, base provenance and tokenizer...', flush=True)
+    print('Checking SFT adapter, base provenance and tokenizer...', flush=True)
     validate_initial_adapter(args.adapter)
     contract = {'contract': CONTRACT, 'algorithm': 'rloo', 'reward': 'boxed-numeric-v1 binary correctness only',
                 'options': {name: getattr(args, name) for name in OPTIONS},
@@ -306,7 +373,7 @@ def main():
     parser.add_argument('stage', choices=('prepare', 'baseline', 'smoke', 'train', 'evaluate', 'report', 'package'))
     parser.add_argument('--adapter', type=Path)
     parser.add_argument('--data-dir', type=Path, default=Path('data/processed'))
-    parser.add_argument('--output-dir', type=Path, default=Path('runs/numeric-rloo-original-sft-v1'))
+    parser.add_argument('--output-dir', type=Path, default=Path('runs') / CONTRACT)
     parser.add_argument('--max-steps', type=int, default=50)
     parser.add_argument('--learning-rate', type=float, default=1e-6)
     parser.add_argument('--global-batch-size', type=int, default=8)
@@ -323,7 +390,7 @@ def main():
             print(package_results(root))
         return
     if args.adapter is None:
-        parser.error('--adapter must point to the original SFT final-model')
+        parser.error('--adapter must point to the new SFT final-model')
     if (args.max_steps < 3 or args.global_batch_size < 4 or args.global_batch_size % 4
             or args.max_new_tokens <= 0 or not 0 < args.learning_rate < float('inf')):
         parser.error('Invalid RL budget or learning rate')

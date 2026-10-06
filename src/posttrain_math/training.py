@@ -90,10 +90,28 @@ def _load_split(data_dir: Path, split: str) -> pd.DataFrame:
         raise FileNotFoundError(f"Processed split not found: {path}")
 
     df = pd.read_parquet(path)
-    missing = {"problem", "solution"} - set(df.columns)
+
+    required = {
+        "problem",
+        "solution",
+        "numeric_eligible",
+    }
+    missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"{split}: missing columns {sorted(missing)}")
-    return df
+        raise ValueError(
+            f"{split}: missing columns {sorted(missing)}. "
+            "Re-run `posttrain-math data prepare`."
+        )
+
+    eligible = df["numeric_eligible"].eq(True).fillna(False)
+    df = df.loc[eligible].copy()
+
+    if df.empty:
+        raise ValueError(
+            f"{split}: boxed-numeric-v1 cohort is empty."
+        )
+
+    return df.reset_index(drop=True)
 
 
 def encode_sft_example(

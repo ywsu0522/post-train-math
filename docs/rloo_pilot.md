@@ -1,4 +1,4 @@
-# 原始 SFT → correctness-only RLOO，Colab T4 pilot
+# Numeric-cohort SFT → correctness-only RLOO，Colab T4 pilot
 
 ## 研究主線
 
@@ -7,15 +7,15 @@ verifier、RLOO/GRPO/Dr.GRPO backend 與 reasoning probe。`master` 保持原始
 Round 2–4 的格式訓練、FSM、repetition/ngram 控制、continued-SFT 與 curriculum gate
 不在新分支的祖先歷史或執行流程中。舊實驗僅留本機 recoverable bundle。
 
-起始權重依使用者選擇採用最初的一輪 SFT，沒有再接 continued-SFT。
-須區分程式與權重來源：本機這份原始 SFT 的 `run_config.json` 記錄訓練 commit 是
-`806fe2f`；無法把現存權重宣稱為在 `4339742` 上訓練。
+起始權重採用本次新產生的兩個 epoch SFT adapter。
+SFT train/dev 強制篩選 `numeric_eligible == True`，沒有關閉此篩選的選項。
 本輪使用 `4339742` 既有的簡短 boxed prompt，重新評估 baseline；不恢復舊 grammar prompt。
-原始權重 SHA256：`40272e18f4b5e0491ebe9e2daaa06b892c143a0093a2ac66ac311203cd180bf5`。
+第一次 `prepare` 將提供的 adapter SHA256 記錄在 `plan.json` 的
+`adapter.adapter_model.safetensors`；同一結果目錄後續執行必須保持相同權重。
 
 ## 為什麼先 RLOO
 
-**先 RLOO，Dr.GRPO 留作後續對照，這輪不補 SFT。**
+**完成新的 SFT 後先跑 RLOO，Dr.GRPO 留作後續對照。**
 RLOO 提供簡單的 leave-one-out baseline，適合先量測現有模型從 terminal reward
 實際獲得多少學習訊號。不預設必須先達到某個 boxed rate 才能開始 RL。
 
@@ -61,7 +61,7 @@ Reward 維持 cohort 的唯一驗證器：最後一個 box 是合法 numeric 且
 
 | 項目 | 值 |
 | --- | --- |
-| Base / adapter | pinned OLMo-2-0425-1B / 原始一輪 SFT LoRA |
+| Base / adapter | pinned OLMo-2-0425-1B / 新 numeric-cohort 兩個 epoch SFT LoRA |
 | RL | RLOO，50 total optimizer steps，包含 smoke 的 2 steps |
 | 每次更新 | 2 個 prompt groups × 4 completions = 8 回覆 |
 | Microbatch / accumulation | 1 / 8，single T4 |
@@ -77,19 +77,19 @@ Reward 維持 cohort 的唯一驗證器：最後一個 box 是合法 numeric 且
 
 ## Colab 怎麼跑
 
-1. 將提供的 `initial-sft-v1-adapter.zip` 放進 Drive 的 `post-train-math-runs` 資料夾。
-   ZIP 是從本機原始 `post-train-math-backup/olmo2-1b-lora-sft-v1/final-model` 打包；
+1. 將新 SFT 的 `final-model` 打包為 `numeric-sft2ep-adapter.zip`，放進 Drive 的
+   `post-train-math-runs` 資料夾；ZIP 根目錄直接包含 adapter 檔案。
    只含 adapter/tokenizer 與來源紀錄，沒有 base weights 或 optimizer。
 2. 開啟 [`rloo_pilot_colab.ipynb`](rloo_pilot_colab.ipynb)，runtime 選 **T4 GPU**。
-   第一格可修改 `ADAPTER_SOURCE`（支援提供的 ZIP 或原始 final-model 目錄）。
+   第一格可修改 `ADAPTER_SOURCE`（支援新的 ZIP 或新 SFT final-model 目錄）。
 3. 由上往下執行。順序是 setup → prepare → baseline → smoke → train → evaluate → package。
    Baseline / evaluate 都只做推論；smoke / train 才是 RL。
 4. 回傳 **analysis_bundle.zip**。成功或失敗都交同一份；可另附有輸出的 notebook。
    完整 checkpoint / `rl/final-model` 保留在 Drive，不必上傳模型權重。
 
-Drive 預設結果目錄：`post-train-math-runs/numeric-rloo-original-sft-v1`。
-第一次先核對原始 adapter weights hash，再下載 pinned base/data；prepare 會再核對
-base provenance 與 tokenizer，避免花完 baseline GPU 時間才發現模型來源不符。
+Drive 預設結果目錄：`post-train-math-runs/numeric-rloo-sft2ep-v1`。
+Setup 顯示 adapter weights hash，再下載 pinned base/data；第一次 prepare 核對
+base provenance 與 tokenizer 並記錄 SHA，後續 prepare 拒絕權重變更。
 
 ## 中斷、進度與分析
 

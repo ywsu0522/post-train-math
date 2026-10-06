@@ -126,7 +126,7 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     adapter, data = tmp_path / 'adapter', tmp_path / 'data'
     adapter.mkdir()
     data.mkdir()
-    (adapter / 'adapter_model.safetensors').write_bytes(b'reviewed weights')
+    (adapter / 'adapter_model.safetensors').write_bytes(b'new numeric-cohort SFT weights')
     write_json(adapter / 'adapter_config.json', {'peft_type': 'LORA'})
     write_json(adapter / 'tokenizer_config.json', {})
     source = {'repo_id': 'test/base', 'resolved_commit': 'pinned'}
@@ -137,12 +137,13 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     base = tmp_path / 'models/olmo-2-0425-1b'
     write_json(base / 'source.json', source)
     (base / 'tokenizer.json').write_bytes((adapter / 'tokenizer.json').read_bytes())
-    monkeypatch.setattr('posttrain_math.rl_pilot.INITIAL_SFT_SHA256', file_hash(adapter / 'adapter_model.safetensors'))
     for name in ('pyproject.toml', 'uv.lock'):
         (tmp_path / name).write_text('')
     args = SimpleNamespace(adapter=adapter, data_dir=data, output_dir=tmp_path / 'run', seed=83,
                            max_steps=50, learning_rate=1e-6, global_batch_size=8, max_new_tokens=512)
     prepare(args)
+    pinned_plan = read_json(args.output_dir / 'plan.json')
+    assert pinned_plan['adapter']['adapter_model.safetensors'] == file_hash(adapter / 'adapter_model.safetensors')
     original = (args.output_dir / 'selection.json').read_bytes()
     prepare(args)
     assert (args.output_dir / 'selection.json').read_bytes() == original
@@ -156,6 +157,12 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     changed.to_parquet(data / 'train.parquet', index=False)
     with pytest.raises(ValueError, match='Inputs/code/options changed'):
         prepare(args)
+    frame('train').to_parquet(data / 'train.parquet', index=False)
     (adapter / 'adapter_model.safetensors').write_bytes(b'different weights')
-    with pytest.raises(ValueError, match='weights do not match'):
+    with pytest.raises(ValueError, match='Inputs/code/options changed'):
         prepare(args)
+    assert read_json(args.output_dir / 'plan.json') == pinned_plan
+    args.output_dir = tmp_path / 'new-run'
+    prepare(args)
+    assert read_json(args.output_dir / 'plan.json')['adapter']['adapter_model.safetensors'] == file_hash(
+        adapter / 'adapter_model.safetensors')

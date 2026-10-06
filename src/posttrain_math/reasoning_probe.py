@@ -121,7 +121,6 @@ def _generate_completion_token_lists(
             temperature=temperature,
             top_p=top_p,
             top_k=0,
-            repetition_penalty=1.0,
             num_return_sequences=num_return_sequences,
             max_new_tokens=max_new_tokens,
             eos_token_id=tokenizer.eos_token_id,
