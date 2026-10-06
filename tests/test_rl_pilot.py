@@ -141,11 +141,13 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
         (tmp_path / name).write_text('')
     args = SimpleNamespace(adapter=adapter, data_dir=data, output_dir=tmp_path / 'run', seed=83,
                            max_steps=50, learning_rate=1e-6, global_batch_size=8, max_new_tokens=512,
-                           precision='fp32')
+                           precision='fp32', num_generations=4, train_levels=None)
     prepare(args)
     pinned_plan = read_json(args.output_dir / 'plan.json')
     assert pinned_plan['adapter']['adapter_model.safetensors'] == file_hash(adapter / 'adapter_model.safetensors')
     assert pinned_plan['options']['precision'] == 'fp32'
+    assert pinned_plan['options']['num_generations'] == 4
+    assert pinned_plan['options']['train_levels'] is None
     original = (args.output_dir / 'selection.json').read_bytes()
     prepare(args)
     assert (args.output_dir / 'selection.json').read_bytes() == original
@@ -158,6 +160,14 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='Inputs/code/options changed'):
         prepare(args)
     args.precision = 'fp32'
+    args.num_generations = 8
+    with pytest.raises(ValueError, match='Inputs/code/options changed'):
+        prepare(args)
+    args.num_generations = 4
+    args.train_levels = [1, 2, 3]
+    with pytest.raises(ValueError, match='Inputs/code/options changed'):
+        prepare(args)
+    args.train_levels = None
     changed = frame('train')
     changed.loc[0, 'problem'] = 'changed problem'
     changed.to_parquet(data / 'train.parquet', index=False)
@@ -225,3 +235,51 @@ def test_rl_metrics_reject_nonfinite_values_before_logging(tmp_path, capsys, val
         callback.on_log(None, SimpleNamespace(global_step=7), None, logs={'loss': value})
     assert not (audit.root / 'train_log.jsonl').exists()
     assert capsys.readouterr().out == ''
+
+
+def test_selection_can_focus_rl_train_levels_without_narrowing_dev():
+    train, dev = frame('train'), frame('dev')
+    train['level'] = [f'Level {i % 5 + 1}' for i in range(len(train))]
+    dev['level'] = [f'Level {i % 5 + 1}' for i in range(len(dev))]
+
+    selected = make_selection(
+        train,
+        dev,
+        token_length=lambda s: 20,
+        seed=83,
+        train_levels=[1, 2, 3],
+        dev_size=80,
+        sample_size=16,
+    )
+
+    assert selected['train_levels'] == [1, 2, 3]
+    assert {c['level'] for c in selected['train']} == {'Level 1', 'Level 2', 'Level 3'}
+    assert {c['level'] for c in selected['dev']} == {
+        'Level 1', 'Level 2', 'Level 3', 'Level 4', 'Level 5'
+    }
+    assert len(selected['train']) == 48
+    assert len(selected['dev']) == 80
+    assert 'restricted to Level 1, Level 2, Level 3' in selected['selection_basis']
+    assert 'Full-distribution development probe' in selected['dev_scope']
+
+
+def test_pilot_cli_passes_g8_to_training(tmp_path, monkeypatch):
+    from posttrain_math.rl_pilot import main
+
+    calls = []
+    monkeypatch.setattr('posttrain_math.rl.train_rl', lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr('posttrain_math.rl_pilot.validate_initial_adapter', lambda adapter: None)
+    monkeypatch.setattr(
+        'sys.argv',
+        [
+            'rl_pilot', 'smoke', '--adapter', str(tmp_path / 'adapter'),
+            '--output-dir', str(tmp_path / 'run'), '--global-batch-size', '8',
+            '--num-generations', '8', '--train-levels', '1', '2', '3', '--worker',
+        ],
+    )
+    main()
+    assert len(calls) == 1
+    assert calls[0]['global_batch_size'] == 8
+    assert calls[0]['num_generations'] == 8
+    assert calls[0]['stop_after_steps'] == 2
+

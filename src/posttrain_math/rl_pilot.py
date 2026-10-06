@@ -27,15 +27,15 @@ from posttrain_math.rl_sampling import (
 )
 
 CONTRACT = 'numeric-rloo-sft2ep-v1'
-OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens', 'precision')
+OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens', 'precision', 'num_generations', 'train_levels')
 
 
 def problem_hash(problem: str) -> str:
     return hashlib.sha256(' '.join(problem.split()).encode()).hexdigest()
 
 
-def make_selection(train, dev, *, token_length, seed: int, dev_size: int = 64, sample_size: int = 16) -> dict:
-    """Keep the numeric cohort across every level/type, independent of model rewards."""
+def make_selection(train, dev, *, token_length, seed: int, train_levels=None, dev_size: int = 64, sample_size: int = 16) -> dict:
+    """Select RL-train difficulty independently from the fixed full-distribution dev probe."""
     from posttrain_math.prompting import get_prompt_formatter
 
     required = {'problem', 'level', 'type', 'numeric_eligible', 'gt_numerator', 'gt_denominator'}
@@ -60,19 +60,32 @@ def make_selection(train, dev, *, token_length, seed: int, dev_size: int = 64, s
             result.append({**case, 'question_id': fingerprint(case)})
         return result
 
+    train_level_values = None if train_levels is None else sorted(set(train_levels))
+    if train_level_values is not None and any(level not in range(1, 6) for level in train_level_values):
+        raise ValueError('train_levels must be drawn from 1..5')
+    allowed_train_levels = (None if train_level_values is None else
+                            {f'Level {level}' for level in train_level_values})
     dev_keys = {problem_hash(str(p)) for p in dev['problem']}
     train_cases = [c for c in cases(train, 'train') if c['problem_sha256'] not in dev_keys]
+    if allowed_train_levels is not None:
+        train_cases = [c for c in train_cases if c['level'] in allowed_train_levels]
     if len(train_cases) < 8:
-        raise ValueError('Too few numeric training prompts')
+        raise ValueError('Too few numeric training prompts after train-level filtering')
     random.Random(seed).shuffle(train_cases)
     dev_cases = cases(dev, 'dev')
     random.Random(seed + 1).shuffle(dev_cases)
     chosen = dev_cases[:dev_size]
     if len(chosen) != dev_size or not 0 < sample_size <= dev_size:
         raise ValueError('Insufficient dev rows for the fixed evaluation')
+    if train_level_values is None:
+        basis = 'Full numeric-eligible train pool; all levels/types; no reward or solution-length selection.'
+    else:
+        labels = ', '.join(f'Level {level}' for level in train_level_values)
+        basis = (f'Numeric-eligible RL train pool restricted to {labels}; '
+                 'no reward or solution-length selection.')
     return {'train': train_cases, 'dev': chosen, 'sampled_dev': chosen[:sample_size],
-            'selection_basis': 'Full numeric-eligible train pool; all levels/types; no reward or solution-length selection.',
-            'dev_scope': 'Development set monitored during SFT; not an untouched test set. Never used for RL updates.'}
+            'train_levels': train_level_values, 'selection_basis': basis,
+            'dev_scope': 'Full-distribution development probe; never filtered by train_levels and never used for RL updates.'}
 
 
 def validate_initial_adapter(adapter: Path) -> None:
@@ -180,7 +193,8 @@ def prepare(args):
     validate_initial_adapter(args.adapter)
     contract = {'contract': CONTRACT, 'algorithm': 'rloo', 'reward': 'boxed-numeric-v1 binary correctness only',
                 'options': {name: getattr(args, name) for name in OPTIONS},
-                'sampling': {'temperature': 1.0, 'top_p': 1.0, 'top_k': 0, 'num_generations': 4, 'beta': 0.0},
+                'sampling': {'temperature': 1.0, 'top_p': 1.0, 'top_k': 0,
+                             'num_generations': args.num_generations, 'beta': 0.0},
                 'adapter': {n: file_hash(args.adapter / n) for n in
                             ('adapter_model.safetensors', 'adapter_config.json', 'tokenizer.json',
                              'tokenizer_config.json', 'base_model_source.json')},
@@ -192,8 +206,9 @@ def prepare(args):
         raise ValueError('Inputs/code/options changed; use a new output directory')
     tokenizer = Tokenizer.from_file(str(args.adapter / 'tokenizer.json'))
     train, dev = (pd.read_parquet(args.data_dir / f'{s}.parquet') for s in ('train', 'dev'))
-    selected = make_selection(train, dev, token_length=lambda s: len(tokenizer.encode(s, add_special_tokens=False).ids),
-                              seed=args.seed)
+    selected = make_selection(train, dev,
+                              token_length=lambda s: len(tokenizer.encode(s, add_special_tokens=False).ids),
+                              seed=args.seed, train_levels=args.train_levels)
     if (root / 'selection.json').exists() and read_json(root / 'selection.json') != selected:
         raise ValueError('Saved dataset selection changed')
     root.mkdir(parents=True, exist_ok=True)
@@ -207,15 +222,19 @@ def prepare(args):
         chosen.reset_index(drop=True).to_parquet(data_path, index=False)
     write_json(plan, contract)
     write_json(root / 'selection.json', selected)
+    level_counts = {str(level): int(count) for level, count in chosen['level'].value_counts().sort_index().items()}
     write_json(root / 'dataset_manifest.json', {'train_parquet_sha256': file_hash(data_path),
-               'train_prompts': len(chosen), 'greedy_dev': 64, 'sampled_dev': 16,
+               'train_prompts': len(chosen), 'train_levels': args.train_levels,
+               'train_level_counts': level_counts, 'num_generations': args.num_generations,
+               'greedy_dev': 64, 'sampled_dev': 16,
                'solution_usage': 'Gold numeric extraction only; no length selection; model sees problem prompt only.'})
     if not (root / 'code_snapshot.zip').exists():
         with zipfile.ZipFile(root / 'code_snapshot.zip', 'w', zipfile.ZIP_DEFLATED) as z:
             for p in sorted(Path('src/posttrain_math').glob('*.py')) + [Path('pyproject.toml'), Path('uv.lock')]:
                 z.write(p, p.as_posix())
     print(f"Prepared {len(chosen)} train prompts; baseline/final each: 64 greedy + 64 sampled answers.", flush=True)
-    print(f"RL: {args.max_steps} total updates, {args.global_batch_size // 4} prompt groups/update, "
+    print(f"RL: {args.max_steps} total updates, "
+          f"G={args.num_generations}, {args.global_batch_size // args.num_generations} prompt groups/update, "
           f"{args.max_steps * args.global_batch_size} planned rollouts; no format-rate gate.", flush=True)
 
 
@@ -271,11 +290,12 @@ def train_worker(args):
         print(f'Smoke already complete; latest checkpoint step={step}', flush=True)
         return
     validate_initial_adapter(args.adapter)
-    print(f'Loading RL model; resuming step {step}; checkpoints and logs persist on Drive.', flush=True)
+    print(f'Loading RL model; resuming step {step}; checkpoints and logs persist in the output directory.', flush=True)
     train_rl(algorithm='rloo', model_path=args.adapter, data_dir=root / 'rl-data', prompt_name='boxed',
              output_dir=output, max_steps=args.max_steps, learning_rate=args.learning_rate,
              per_device_batch_size=1, gradient_accumulation=None, global_batch_size=args.global_batch_size,
-             num_generations=4, max_prompt_length=1024, max_completion_length=args.max_new_tokens,
+             num_generations=args.num_generations, max_prompt_length=1024,
+             max_completion_length=args.max_new_tokens,
              temperature=1.0, top_p=1.0, beta=0.0, precision=args.precision, gradient_checkpointing=True,
              logging_steps=1, save_steps=10, save_total_limit=2, seed=args.seed, limit_prompts=None,
              resume_from_checkpoint=checkpoint, audit_rollouts=True,
@@ -379,9 +399,13 @@ def main():
     parser.add_argument('--global-batch-size', type=int, default=8)
     parser.add_argument('--max-new-tokens', type=int, default=512)
     parser.add_argument('--precision', choices=('auto', 'fp16', 'bf16', 'fp32'), default='auto')
+    parser.add_argument('--num-generations', type=int, default=4)
+    parser.add_argument('--train-levels', type=int, nargs='+', choices=range(1, 6), default=None)
     parser.add_argument('--seed', type=int, default=83)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.train_levels is not None:
+        args.train_levels = sorted(set(args.train_levels))
     root = args.output_dir
     if args.stage in ('report', 'package'):
         if not root.is_dir():
@@ -392,9 +416,11 @@ def main():
         return
     if args.adapter is None:
         parser.error('--adapter must point to the new SFT final-model')
-    if (args.max_steps < 3 or args.global_batch_size < 4 or args.global_batch_size % 4
+    if (args.max_steps < 3 or args.num_generations < 2
+            or args.global_batch_size < args.num_generations
+            or args.global_batch_size % args.num_generations
             or args.max_new_tokens <= 0 or not 0 < args.learning_rate < float('inf')):
-        parser.error('Invalid RL budget or learning rate')
+        parser.error('Invalid RL budget, group size, global batch or learning rate')
     if args.worker:
         if args.stage in ('smoke', 'train'):
             train_worker(args)
