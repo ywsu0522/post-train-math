@@ -140,10 +140,12 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     for name in ('pyproject.toml', 'uv.lock'):
         (tmp_path / name).write_text('')
     args = SimpleNamespace(adapter=adapter, data_dir=data, output_dir=tmp_path / 'run', seed=83,
-                           max_steps=50, learning_rate=1e-6, global_batch_size=8, max_new_tokens=512)
+                           max_steps=50, learning_rate=1e-6, global_batch_size=8, max_new_tokens=512,
+                           precision='fp32')
     prepare(args)
     pinned_plan = read_json(args.output_dir / 'plan.json')
     assert pinned_plan['adapter']['adapter_model.safetensors'] == file_hash(adapter / 'adapter_model.safetensors')
+    assert pinned_plan['options']['precision'] == 'fp32'
     original = (args.output_dir / 'selection.json').read_bytes()
     prepare(args)
     assert (args.output_dir / 'selection.json').read_bytes() == original
@@ -152,6 +154,10 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='Inputs/code/options changed'):
         prepare(args)
     args.max_steps = 50
+    args.precision = 'auto'
+    with pytest.raises(ValueError, match='Inputs/code/options changed'):
+        prepare(args)
+    args.precision = 'fp32'
     changed = frame('train')
     changed.loc[0, 'problem'] = 'changed problem'
     changed.to_parquet(data / 'train.parquet', index=False)
@@ -166,3 +172,56 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     prepare(args)
     assert read_json(args.output_dir / 'plan.json')['adapter']['adapter_model.safetensors'] == file_hash(
         adapter / 'adapter_model.safetensors')
+
+
+@pytest.mark.parametrize('precision', [None, 'auto', 'fp16', 'bf16', 'fp32'])
+def test_pilot_cli_passes_precision_to_training(tmp_path, monkeypatch, precision):
+    from posttrain_math.rl_pilot import main
+
+    calls = []
+    monkeypatch.setattr('posttrain_math.rl.train_rl', lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr('posttrain_math.rl_pilot.validate_initial_adapter', lambda adapter: None)
+    argv = ['rl_pilot', 'smoke', '--adapter', str(tmp_path / 'adapter'),
+            '--output-dir', str(tmp_path / 'run'), '--worker']
+    if precision is not None:
+        argv.extend(['--precision', precision])
+    monkeypatch.setattr('sys.argv', argv)
+    main()
+    assert len(calls) == 1
+    assert calls[0]['precision'] == (precision or 'auto')
+    assert calls[0]['max_steps'] == 50
+    assert calls[0]['stop_after_steps'] == 2
+
+
+def test_rl_metrics_are_printed_and_preserved_in_json(tmp_path, capsys):
+    from posttrain_math.rl_monitoring import RLProgressCallback, RolloutAudit
+
+    audit = RolloutAudit(tmp_path, group_size=4, eos_token_id=0, max_tokens=16)
+    callback = RLProgressCallback(tmp_path, audit, {}, stop_after=None)
+    state = SimpleNamespace(global_step=7)
+    logs = {'loss': 0.123456789, 'grad_norm': 0.5, 'learning_rate': 1e-6,
+            'reward': 0.25, 'reward_std': 0.1, 'frac_reward_zero_std': 0.0,
+            'entropy': 1.5, 'completions/mean_length': 32.5, 'num_tokens': 256,
+            'step_time': 2.5, 'custom_metric': 42}
+    callback.on_log(None, state, None, logs=logs)
+    assert capsys.readouterr().out == (
+        '[rl-metrics] step=7 loss=0.123457 grad_norm=0.5 lr=1e-06 reward=0.25 '
+        'reward_std=0.1 zero_std=0 entropy=1.5 mean_len=32.5 tokens=256 step_s=2.5\n'
+    )
+    callback.on_log(None, state, None, logs={'custom_metric': 43})
+    callback.on_log(None, state, None)
+    assert capsys.readouterr().out == ''
+    rows = [json.loads(line) for line in (audit.root / 'train_log.jsonl').read_text().splitlines()]
+    assert rows == [{'step': 7, **logs}, {'step': 7, 'custom_metric': 43}, {'step': 7}]
+
+
+@pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf')])
+def test_rl_metrics_reject_nonfinite_values_before_logging(tmp_path, capsys, value):
+    from posttrain_math.rl_monitoring import RLProgressCallback, RolloutAudit
+
+    audit = RolloutAudit(tmp_path, group_size=4, eos_token_id=0, max_tokens=16)
+    callback = RLProgressCallback(tmp_path, audit, {}, stop_after=None)
+    with pytest.raises(FloatingPointError, match='Non-finite RL metrics at step 7'):
+        callback.on_log(None, SimpleNamespace(global_step=7), None, logs={'loss': value})
+    assert not (audit.root / 'train_log.jsonl').exists()
+    assert capsys.readouterr().out == ''

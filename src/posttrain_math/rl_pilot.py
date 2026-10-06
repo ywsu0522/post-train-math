@@ -27,7 +27,7 @@ from posttrain_math.rl_sampling import (
 )
 
 CONTRACT = 'numeric-rloo-sft2ep-v1'
-OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens')
+OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens', 'precision')
 
 
 def problem_hash(problem: str) -> str:
@@ -276,7 +276,7 @@ def train_worker(args):
              output_dir=output, max_steps=args.max_steps, learning_rate=args.learning_rate,
              per_device_batch_size=1, gradient_accumulation=None, global_batch_size=args.global_batch_size,
              num_generations=4, max_prompt_length=1024, max_completion_length=args.max_new_tokens,
-             temperature=1.0, top_p=1.0, beta=0.0, precision='auto', gradient_checkpointing=True,
+             temperature=1.0, top_p=1.0, beta=0.0, precision=args.precision, gradient_checkpointing=True,
              logging_steps=1, save_steps=10, save_total_limit=2, seed=args.seed, limit_prompts=None,
              resume_from_checkpoint=checkpoint, audit_rollouts=True,
              stop_after_steps=2 if args.stage == 'smoke' else None)
@@ -378,6 +378,7 @@ def main():
     parser.add_argument('--learning-rate', type=float, default=1e-6)
     parser.add_argument('--global-batch-size', type=int, default=8)
     parser.add_argument('--max-new-tokens', type=int, default=512)
+    parser.add_argument('--precision', choices=('auto', 'fp16', 'bf16', 'fp32'), default='auto')
     parser.add_argument('--seed', type=int, default=83)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()

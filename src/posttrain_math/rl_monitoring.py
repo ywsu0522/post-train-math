@@ -118,6 +118,28 @@ class RLProgressCallback(TrainerCallback):
             raise FloatingPointError(f'Non-finite RL metrics at step {state.global_step}: {values}')
         append_json(self.audit.root / 'train_log.jsonl', {'step': state.global_step, **values})
 
+        display = (
+            ('loss', 'loss'),
+            ('grad_norm', 'grad_norm'),
+            ('learning_rate', 'lr'),
+            ('reward', 'reward'),
+            ('reward_std', 'reward_std'),
+            ('frac_reward_zero_std', 'zero_std'),
+            ('entropy', 'entropy'),
+            ('completions/mean_length', 'mean_len'),
+            ('num_tokens', 'tokens'),
+            ('step_time', 'step_s'),
+        )
+        fields = []
+        for key, label in display:
+            if key not in values:
+                continue
+            value = values[key]
+            rendered = f'{value:.6g}' if isinstance(value, float) else str(value)
+            fields.append(f'{label}={rendered}')
+        if fields:
+            print(f"[rl-metrics] step={state.global_step} " + ' '.join(fields), flush=True)
+
     def on_save(self, args, state, control, **kwargs):
         path = self.output / f'checkpoint-{state.global_step}'
         if not normalize_adapter_artifact(path, self.base_source):
