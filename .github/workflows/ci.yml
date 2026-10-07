@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - codex/boxed-numeric-rl
   pull_request:
   workflow_dispatch:
 

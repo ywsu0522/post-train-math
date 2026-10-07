@@ -263,9 +263,9 @@ def test_selection_applies_one_level_scope_to_train_support_and_validation():
     assert {c['level'] for c in selected['sampled_dev']} <= expected
     assert len(selected['support_train']) == 24
     assert len(selected['dev']) == 64
-    assert set(c['question_id'] for c in selected['support_train']) <= set(
+    assert {c['question_id'] for c in selected['support_train']} <= {
         c['question_id'] for c in selected['train']
-    )
+    }
     assert not (
         {c['problem_sha256'] for c in selected['train']}
         & {c['problem_sha256'] for c in selected['dev']}
