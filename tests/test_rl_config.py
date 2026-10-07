@@ -45,6 +45,8 @@ def test_dr_grpo_contract_removes_reward_std_scaling() -> None:
 
 def test_rloo_contract_is_one_iteration_without_advantage_normalization() -> None:
     config = _config("rloo")
+    assert getattr(config.lr_scheduler_type, "value", config.lr_scheduler_type) == "constant"
+    assert config.warmup_steps == 0
     assert config.num_iterations == 1
     assert config.normalize_advantages is False
     assert config.beta == 0.0

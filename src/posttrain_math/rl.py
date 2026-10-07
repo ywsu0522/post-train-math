@@ -135,6 +135,8 @@ def _common_trainer_kwargs(
         "output_dir": str(output_dir),
         "max_steps": max_steps,
         "learning_rate": learning_rate,
+        "lr_scheduler_type": "constant",
+        "warmup_steps": 0,
         "per_device_train_batch_size": per_device_batch_size,
         "gradient_accumulation_steps": gradient_accumulation,
         "max_grad_norm": 1.0,
@@ -364,6 +366,7 @@ def train_rl(
         "data": data_stats,
         "max_steps": max_steps,
         "learning_rate": learning_rate,
+        "lr_scheduler": {"type": getattr(trainer_config.lr_scheduler_type, "value", str(trainer_config.lr_scheduler_type)), "warmup_steps": trainer_config.warmup_steps},
         "per_device_batch_size": per_device_batch_size,
         "world_size": context.world_size,
         "gradient_accumulation": resolved_accumulation,
@@ -423,6 +426,7 @@ def train_rl(
         print(f"- max completion length: {max_completion_length}")
         print(f"- max steps: {max_steps}")
         print(f"- learning rate: {learning_rate}")
+        print("- LR scheduler: constant; warmup_steps=0")
         print("- reward: boxed-numeric-v1 binary {0,1}; no process reward")
         print(f"- sampling: temperature={temperature}, top_p={top_p}")
         print(f"- KL beta: {beta}")

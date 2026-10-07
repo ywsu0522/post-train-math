@@ -150,6 +150,7 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     assert pinned_plan['options']['precision'] == 'fp32'
     assert pinned_plan['options']['num_generations'] == 4
     assert pinned_plan['options']['levels'] is None
+    assert pinned_plan['optimization'] == {'lr_scheduler_type': 'constant', 'warmup_steps': 0}
     original = (args.output_dir / 'selection.json').read_bytes()
     prepare(args)
     assert (args.output_dir / 'selection.json').read_bytes() == original
@@ -342,3 +343,29 @@ def test_support_worker_scans_training_subset_only(tmp_path, monkeypatch):
     assert summary['curve']['32']['all_correct_groups'] == 3
     assert summary['recommended_k'] is None
 
+def test_train_worker_can_pause_at_session_boundary_without_marking_run_complete(tmp_path, monkeypatch):
+    output = tmp_path / 'rl'
+    adapter = tmp_path / 'sft'
+    adapter.mkdir()
+    calls = []
+
+    monkeypatch.setattr('posttrain_math.rl_pilot.validate_initial_adapter', lambda path: None)
+
+    def fake_train_rl(**kwargs):
+        calls.append(kwargs)
+        cp = checkpoint(output, 50)
+        write_json(cp / 'complete.json', {'step': 50})
+
+    monkeypatch.setattr('posttrain_math.rl.train_rl', fake_train_rl)
+    args = SimpleNamespace(
+        stage='train', output_dir=tmp_path, adapter=adapter, max_steps=1000,
+        learning_rate=1e-6, global_batch_size=16, num_generations=16,
+        max_new_tokens=512, precision='fp32', seed=83, stop_at_step=50,
+    )
+    train_worker(args)
+    assert len(calls) == 1
+    assert calls[0]['stop_after_steps'] == 50
+    assert calls[0]['max_steps'] == 1000
+    assert complete_checkpoint(output).name == 'checkpoint-50'
+    assert not (output / 'complete.json').exists()
+    assert not (output / 'final-model').exists()

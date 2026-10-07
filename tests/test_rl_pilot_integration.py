@@ -51,6 +51,9 @@ def test_real_rloo_smoke_checkpoint_resume_and_export(tmp_path, monkeypatch):
               'beta': 0.0, 'precision': 'fp32', 'gradient_checkpointing': True, 'logging_steps': 1,
               'save_steps': 1, 'save_total_limit': 2, 'seed': 83, 'limit_prompts': None, 'audit_rollouts': True}
     train_rl(**config, resume_from_checkpoint=None, stop_after_steps=1)
+    first_logs = [json.loads(line) for p in (output / 'attempts').glob('*/train_log.jsonl')
+                  for line in p.read_text().splitlines() if line.strip()]
+    assert any(row.get('learning_rate') == 1e-6 for row in first_logs)
     checkpoint = complete_checkpoint(output)
     assert checkpoint.name == 'checkpoint-1'
     assert not (output / 'final-model').exists()
@@ -60,6 +63,8 @@ def test_real_rloo_smoke_checkpoint_resume_and_export(tmp_path, monkeypatch):
     assert (output / 'final-model/base_model_source.json').exists()
     assert (output / 'final-model/tokenizer.json').exists()
     assert (output / 'train_summary.json').exists()
+    run_config = json.loads((output / 'run_config.json').read_text())
+    assert run_config['lr_scheduler'] == {'type': 'constant', 'warmup_steps': 0}
     assert (output / 'final-model/adapter_model.safetensors').read_bytes() != smoke_weights
     records = [json.loads(line) for p in (output / 'attempts').glob('*/rollouts.jsonl')
                for line in p.read_text().splitlines()]

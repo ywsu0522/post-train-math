@@ -26,7 +26,7 @@ from posttrain_math.rl_sampling import (
     tasks,
 )
 
-CONTRACT = 'numeric-rloo-sft2ep-v1'
+CONTRACT = 'numeric-rloo-sft2ep-constant-v2'
 OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens', 'precision', 'num_generations', 'levels')
 
 
@@ -207,6 +207,7 @@ def prepare(args):
                 'options': {name: getattr(args, name) for name in OPTIONS},
                 'sampling': {'temperature': 1.0, 'top_p': 1.0, 'top_k': 0,
                              'num_generations': args.num_generations, 'beta': 0.0},
+                'optimization': {'lr_scheduler_type': 'constant', 'warmup_steps': 0},
                 'adapter': {n: file_hash(args.adapter / n) for n in
                             ('adapter_model.safetensors', 'adapter_config.json', 'tokenizer.json',
                              'tokenizer_config.json', 'base_model_source.json')},
@@ -302,6 +303,10 @@ def train_worker(args):
     if args.stage == 'smoke' and step >= 2:
         print(f'Smoke already complete; latest checkpoint step={step}', flush=True)
         return
+    stop_at_step = 2 if args.stage == 'smoke' else getattr(args, 'stop_at_step', None)
+    if args.stage == 'train' and stop_at_step is not None and step >= stop_at_step:
+        print(f'Session target already reached; latest checkpoint step={step}', flush=True)
+        return
     validate_initial_adapter(args.adapter)
     print(f'Loading RL model; resuming step {step}; checkpoints and logs persist in the output directory.', flush=True)
     train_rl(algorithm='rloo', model_path=args.adapter, data_dir=root / 'rl-data', prompt_name='boxed',
@@ -312,9 +317,19 @@ def train_worker(args):
              temperature=1.0, top_p=1.0, beta=0.0, precision=args.precision, gradient_checkpointing=True,
              logging_steps=1, save_steps=10, save_total_limit=2, seed=args.seed, limit_prompts=None,
              resume_from_checkpoint=checkpoint, audit_rollouts=True,
-             stop_after_steps=2 if args.stage == 'smoke' else None)
+             stop_after_steps=stop_at_step)
     if args.stage == 'train':
-        summary = read_json(output / 'train_summary.json')
+        summary_path = output / 'train_summary.json'
+        if not summary_path.is_file():
+            checkpoint = complete_checkpoint(output)
+            if checkpoint is None:
+                raise RuntimeError('Training paused without a complete resumable checkpoint')
+            paused_step = int(checkpoint.name.rsplit('-', 1)[-1])
+            if stop_at_step is None or paused_step < stop_at_step:
+                raise RuntimeError('Training stopped before the requested session boundary')
+            print(f'Paused resumably at global step {paused_step}.', flush=True)
+            return
+        summary = read_json(summary_path)
         write_json(done, {'max_steps': args.max_steps, 'weights_sha256': file_hash(
             output / 'final-model/adapter_model.safetensors'), 'train_summary_sha256': fingerprint(summary)})
 
@@ -424,7 +439,7 @@ def report(root: Path) -> dict:
     support = root / 'support/summary.json'
     if support.exists():
         result['support_scan'] = read_json(support)
-    lines = ['# RLOO pilot', '', 'Correctness-only RL; fixed 50-step budget by default. No box-rate gate.', '',
+    lines = ['# RLOO pilot', '', 'Correctness-only RL with constant LR and resumable checkpoint boundaries. No box-rate gate.', '',
              '| Model | Dev cohort | N | Numeric box | Correct | Token limit |',
              '| --- | --- | ---: | ---: | ---: | ---: |']
     for name in ('sft', 'rloo'):
@@ -478,6 +493,7 @@ def main():
     parser.add_argument('--precision', choices=('auto', 'fp16', 'bf16', 'fp32'), default='auto')
     parser.add_argument('--num-generations', type=int, default=4)
     parser.add_argument('--levels', type=int, nargs='+', choices=range(1, 6), default=None)
+    parser.add_argument('--stop-at-step', type=int, default=None, help='Session-only absolute global step at which to save and pause training.')
     parser.add_argument('--seed', type=int, default=83)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -498,6 +514,11 @@ def main():
             or args.global_batch_size % args.num_generations
             or args.max_new_tokens <= 0 or not 0 < args.learning_rate < float('inf')):
         parser.error('Invalid RL budget, group size, global batch or learning rate')
+    if args.stop_at_step is not None:
+        if args.stage != 'train':
+            parser.error('--stop-at-step is only valid with the train stage')
+        if not 0 < args.stop_at_step <= args.max_steps:
+            parser.error('--stop-at-step must be in 1..max_steps')
     if args.worker:
         if args.stage in ('smoke', 'train'):
             train_worker(args)
