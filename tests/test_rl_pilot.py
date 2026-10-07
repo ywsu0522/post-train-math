@@ -37,6 +37,8 @@ def test_selection_keeps_all_levels_without_solution_or_reward_filtering():
     assert len(groups[1]) == 64 and len(groups[2]) == 16
     assert not groups[0] & groups[1] and groups[2] <= groups[1]
     assert selected == make_selection(train, dev, token_length=lambda s: 20, seed=83)
+    assert selected['support_scope'].startswith('Fixed training-set subset')
+    assert selected['validation_scope'].startswith('Held-out dev split')
 
 
 def test_eval_pairing_is_fixed_and_resume_does_not_reload_gpu(tmp_path, monkeypatch):
@@ -141,13 +143,13 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
         (tmp_path / name).write_text('')
     args = SimpleNamespace(adapter=adapter, data_dir=data, output_dir=tmp_path / 'run', seed=83,
                            max_steps=50, learning_rate=1e-6, global_batch_size=8, max_new_tokens=512,
-                           precision='fp32', num_generations=4, train_levels=None)
+                           precision='fp32', num_generations=4, levels=None)
     prepare(args)
     pinned_plan = read_json(args.output_dir / 'plan.json')
     assert pinned_plan['adapter']['adapter_model.safetensors'] == file_hash(adapter / 'adapter_model.safetensors')
     assert pinned_plan['options']['precision'] == 'fp32'
     assert pinned_plan['options']['num_generations'] == 4
-    assert pinned_plan['options']['train_levels'] is None
+    assert pinned_plan['options']['levels'] is None
     original = (args.output_dir / 'selection.json').read_bytes()
     prepare(args)
     assert (args.output_dir / 'selection.json').read_bytes() == original
@@ -164,10 +166,10 @@ def test_prepare_pins_selection_weights_data_and_options(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='Inputs/code/options changed'):
         prepare(args)
     args.num_generations = 4
-    args.train_levels = [1, 2, 3]
+    args.levels = [1, 2, 3]
     with pytest.raises(ValueError, match='Inputs/code/options changed'):
         prepare(args)
-    args.train_levels = None
+    args.levels = None
     changed = frame('train')
     changed.loc[0, 'problem'] = 'changed problem'
     changed.to_parquet(data / 'train.parquet', index=False)
@@ -237,8 +239,8 @@ def test_rl_metrics_reject_nonfinite_values_before_logging(tmp_path, capsys, val
     assert capsys.readouterr().out == ''
 
 
-def test_selection_can_focus_rl_train_levels_without_narrowing_dev():
-    train, dev = frame('train'), frame('dev')
+def test_selection_applies_one_level_scope_to_train_support_and_validation():
+    train, dev = frame('train', 150), frame('dev', 150)
     train['level'] = [f'Level {i % 5 + 1}' for i in range(len(train))]
     dev['level'] = [f'Level {i % 5 + 1}' for i in range(len(dev))]
 
@@ -247,20 +249,30 @@ def test_selection_can_focus_rl_train_levels_without_narrowing_dev():
         dev,
         token_length=lambda s: 20,
         seed=83,
-        train_levels=[1, 2, 3],
-        dev_size=80,
+        levels=[1, 2, 3],
+        dev_size=64,
         sample_size=16,
+        support_per_level=8,
     )
 
-    assert selected['train_levels'] == [1, 2, 3]
-    assert {c['level'] for c in selected['train']} == {'Level 1', 'Level 2', 'Level 3'}
-    assert {c['level'] for c in selected['dev']} == {
-        'Level 1', 'Level 2', 'Level 3', 'Level 4', 'Level 5'
-    }
-    assert len(selected['train']) == 48
-    assert len(selected['dev']) == 80
+    expected = {'Level 1', 'Level 2', 'Level 3'}
+    assert selected['levels'] == [1, 2, 3]
+    assert {c['level'] for c in selected['train']} == expected
+    assert {c['level'] for c in selected['support_train']} == expected
+    assert {c['level'] for c in selected['dev']} == expected
+    assert {c['level'] for c in selected['sampled_dev']} <= expected
+    assert len(selected['support_train']) == 24
+    assert len(selected['dev']) == 64
+    assert set(c['question_id'] for c in selected['support_train']) <= set(
+        c['question_id'] for c in selected['train']
+    )
+    assert not (
+        {c['problem_sha256'] for c in selected['train']}
+        & {c['problem_sha256'] for c in selected['dev']}
+    )
     assert 'restricted to Level 1, Level 2, Level 3' in selected['selection_basis']
-    assert 'Full-distribution development probe' in selected['dev_scope']
+    assert 'training-set subset' in selected['support_scope']
+    assert 'Held-out dev split' in selected['validation_scope']
 
 
 def test_pilot_cli_passes_g8_to_training(tmp_path, monkeypatch):
@@ -274,7 +286,7 @@ def test_pilot_cli_passes_g8_to_training(tmp_path, monkeypatch):
         [
             'rl_pilot', 'smoke', '--adapter', str(tmp_path / 'adapter'),
             '--output-dir', str(tmp_path / 'run'), '--global-batch-size', '8',
-            '--num-generations', '8', '--train-levels', '1', '2', '3', '--worker',
+            '--num-generations', '8', '--levels', '1', '2', '3', '--worker',
         ],
     )
     main()
@@ -282,4 +294,51 @@ def test_pilot_cli_passes_g8_to_training(tmp_path, monkeypatch):
     assert calls[0]['global_batch_size'] == 8
     assert calls[0]['num_generations'] == 8
     assert calls[0]['stop_after_steps'] == 2
+
+
+def test_support_worker_scans_training_subset_only(tmp_path, monkeypatch):
+    from posttrain_math.rl_pilot import support_worker
+    from posttrain_math.rollout_records import GenerationResult
+
+    selected = {
+        'support_train': [
+            {
+                'split': 'train',
+                'source_index': i,
+                'problem': f'q{i}',
+                'problem_sha256': f'h{i}',
+                'prompt': f'prompt {i}',
+                'gt_numerator': 1,
+                'gt_denominator': 1,
+                'subject': 'Algebra',
+                'level': f'Level {i + 1}',
+                'question_id': f'id{i}',
+            }
+            for i in range(3)
+        ]
+    }
+    write_json(tmp_path / 'selection.json', selected)
+    adapter = tmp_path / 'adapter'
+    adapter.mkdir()
+
+    class Runner:
+        def iter_generate_records(self, prompts, **kwargs):
+            yield GenerationResult(r'\boxed{1}', [1, 0], 'eos')
+
+    monkeypatch.setattr(
+        'posttrain_math.rollout_records.PilotRunner.from_pretrained',
+        lambda *a, **k: Runner(),
+    )
+    args = SimpleNamespace(output_dir=tmp_path, adapter=adapter, seed=83, max_new_tokens=32)
+    support_worker(args)
+
+    summary = read_json(tmp_path / 'support/summary.json')
+    assert summary['source'] == 'training split only'
+    assert summary['validation_used'] is False
+    assert summary['questions'] == 3
+    assert summary['samples_per_question'] == 32
+    assert summary['ks'] == [4, 8, 16, 32]
+    assert summary['curve']['32']['observed_success_at_k'] == 1.0
+    assert summary['curve']['32']['all_correct_groups'] == 3
+    assert summary['recommended_k'] is None
 

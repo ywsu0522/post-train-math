@@ -27,15 +27,15 @@ from posttrain_math.rl_sampling import (
 )
 
 CONTRACT = 'numeric-rloo-sft2ep-v1'
-OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens', 'precision', 'num_generations', 'train_levels')
+OPTIONS = ('seed', 'max_steps', 'learning_rate', 'global_batch_size', 'max_new_tokens', 'precision', 'num_generations', 'levels')
 
 
 def problem_hash(problem: str) -> str:
     return hashlib.sha256(' '.join(problem.split()).encode()).hexdigest()
 
 
-def make_selection(train, dev, *, token_length, seed: int, train_levels=None, dev_size: int = 64, sample_size: int = 16) -> dict:
-    """Select RL-train difficulty independently from the fixed full-distribution dev probe."""
+def make_selection(train, dev, *, token_length, seed: int, levels=None, dev_size: int = 64, sample_size: int = 16, support_per_level: int = 16) -> dict:
+    """Apply one level scope to train/validation; keep support scan inside training data."""
     from posttrain_math.prompting import get_prompt_formatter
 
     required = {'problem', 'level', 'type', 'numeric_eligible', 'gt_numerator', 'gt_denominator'}
@@ -60,32 +60,44 @@ def make_selection(train, dev, *, token_length, seed: int, train_levels=None, de
             result.append({**case, 'question_id': fingerprint(case)})
         return result
 
-    train_level_values = None if train_levels is None else sorted(set(train_levels))
-    if train_level_values is not None and any(level not in range(1, 6) for level in train_level_values):
-        raise ValueError('train_levels must be drawn from 1..5')
-    allowed_train_levels = (None if train_level_values is None else
-                            {f'Level {level}' for level in train_level_values})
+    level_values = None if levels is None else sorted(set(levels))
+    if level_values is not None and any(level not in range(1, 6) for level in level_values):
+        raise ValueError('levels must be drawn from 1..5')
+    allowed_levels = None if level_values is None else {f'Level {level}' for level in level_values}
+
     dev_keys = {problem_hash(str(p)) for p in dev['problem']}
     train_cases = [c for c in cases(train, 'train') if c['problem_sha256'] not in dev_keys]
-    if allowed_train_levels is not None:
-        train_cases = [c for c in train_cases if c['level'] in allowed_train_levels]
-    if len(train_cases) < 8:
-        raise ValueError('Too few numeric training prompts after train-level filtering')
-    random.Random(seed).shuffle(train_cases)
     dev_cases = cases(dev, 'dev')
+    if allowed_levels is not None:
+        train_cases = [c for c in train_cases if c['level'] in allowed_levels]
+        dev_cases = [c for c in dev_cases if c['level'] in allowed_levels]
+    if len(train_cases) < 8:
+        raise ValueError('Too few numeric training prompts after level filtering')
+
+    random.Random(seed).shuffle(train_cases)
     random.Random(seed + 1).shuffle(dev_cases)
     chosen = dev_cases[:dev_size]
     if len(chosen) != dev_size or not 0 < sample_size <= dev_size:
-        raise ValueError('Insufficient dev rows for the fixed evaluation')
-    if train_level_values is None:
-        basis = 'Full numeric-eligible train pool; all levels/types; no reward or solution-length selection.'
+        raise ValueError('Insufficient level-filtered dev rows for the fixed validation')
+
+    support_train = []
+    support_levels = sorted({c['level'] for c in train_cases})
+    for label in support_levels:
+        candidates = [c for c in train_cases if c['level'] == label]
+        if len(candidates) < support_per_level:
+            raise ValueError(f'Insufficient training rows for support scan: {label}')
+        support_train.extend(candidates[:support_per_level])
+
+    if level_values is None:
+        basis = 'Numeric-eligible train and validation pools; all levels/types.'
     else:
-        labels = ', '.join(f'Level {level}' for level in train_level_values)
-        basis = (f'Numeric-eligible RL train pool restricted to {labels}; '
-                 'no reward or solution-length selection.')
-    return {'train': train_cases, 'dev': chosen, 'sampled_dev': chosen[:sample_size],
-            'train_levels': train_level_values, 'selection_basis': basis,
-            'dev_scope': 'Full-distribution development probe; never filtered by train_levels and never used for RL updates.'}
+        labels = ', '.join(f'Level {level}' for level in level_values)
+        basis = f'Numeric-eligible train and validation pools restricted to {labels}.'
+    return {'train': train_cases, 'support_train': support_train,
+            'dev': chosen, 'sampled_dev': chosen[:sample_size], 'levels': level_values,
+            'selection_basis': basis,
+            'support_scope': 'Fixed training-set subset; used only to estimate reward support and choose K/G.',
+            'validation_scope': 'Held-out dev split within the same level scope; never used for gradients or K/G selection.'}
 
 
 def validate_initial_adapter(adapter: Path) -> None:
@@ -208,7 +220,7 @@ def prepare(args):
     train, dev = (pd.read_parquet(args.data_dir / f'{s}.parquet') for s in ('train', 'dev'))
     selected = make_selection(train, dev,
                               token_length=lambda s: len(tokenizer.encode(s, add_special_tokens=False).ids),
-                              seed=args.seed, train_levels=args.train_levels)
+                              seed=args.seed, levels=args.levels)
     if (root / 'selection.json').exists() and read_json(root / 'selection.json') != selected:
         raise ValueError('Saved dataset selection changed')
     root.mkdir(parents=True, exist_ok=True)
@@ -224,9 +236,10 @@ def prepare(args):
     write_json(root / 'selection.json', selected)
     level_counts = {str(level): int(count) for level, count in chosen['level'].value_counts().sort_index().items()}
     write_json(root / 'dataset_manifest.json', {'train_parquet_sha256': file_hash(data_path),
-               'train_prompts': len(chosen), 'train_levels': args.train_levels,
-               'train_level_counts': level_counts, 'num_generations': args.num_generations,
-               'greedy_dev': 64, 'sampled_dev': 16,
+               'train_prompts': len(chosen), 'levels': args.levels,
+               'train_level_counts': level_counts, 'support_prompts': len(selected['support_train']),
+               'support_samples_per_prompt': 32, 'num_generations': args.num_generations,
+               'validation_greedy': 64, 'validation_sampled': 16,
                'solution_usage': 'Gold numeric extraction only; no length selection; model sees problem prompt only.'})
     if not (root / 'code_snapshot.zip').exists():
         with zipfile.ZipFile(root / 'code_snapshot.zip', 'w', zipfile.ZIP_DEFLATED) as z:
@@ -306,6 +319,67 @@ def train_worker(args):
             output / 'final-model/adapter_model.safetensors'), 'train_summary_sha256': fingerprint(summary)})
 
 
+
+
+def support_worker(args):
+    """Estimate SFT reward support on a fixed subset of training prompts."""
+    from posttrain_math.rollout_records import PilotRunner
+
+    root = args.output_dir
+    selected = read_json(root / 'selection.json')
+    adapter = args.adapter
+    runner = None
+
+    def get_runner():
+        nonlocal runner
+        if runner is None:
+            print('Loading SFT adapter for training-set reward-support scan...', flush=True)
+            runner = PilotRunner.from_pretrained(adapter, batch_size=1)
+        return runner
+
+    config = {'max_new_tokens': args.max_new_tokens, 'do_sample': True,
+              'temperature': 1.0, 'top_p': 1.0, 'top_k': 0}
+    expected = tasks(selected['support_train'], 32, args.seed + 200)
+    rows = run_job(root / 'support' / 'sft_k32' / 'predictions.jsonl',
+                   expected, config, get_runner)
+
+    ks = (4, 8, 16, 32)
+    curves = {}
+    for k in ks:
+        subset = [row for row in rows if row['sample_index'] < k]
+        curves[str(k)] = coverage(subset, k)
+
+    per_level = {}
+    for label in sorted({case['level'] for case in selected['support_train']}):
+        level_rows = [row for row in rows if row['level'] == label]
+        per_level[label] = {}
+        for k in ks:
+            subset = [row for row in level_rows if row['sample_index'] < k]
+            per_level[label][str(k)] = coverage(subset, k)
+
+    viable = [k for k in ks if curves[str(k)]['mixed_group_rate'] >= 0.4]
+    recommendation = min(viable) if viable else None
+    summary = {
+        'source': 'training split only',
+        'questions': len(selected['support_train']),
+        'samples_per_question': 32,
+        'ks': list(ks),
+        'curve': curves,
+        'per_level': per_level,
+        'recommended_k': recommendation,
+        'criterion': 'smallest K with observed mixed_group_rate >= 0.40',
+        'validation_used': False,
+    }
+    write_json(root / 'support' / 'summary.json', summary)
+    print('Reward-support scan complete.', flush=True)
+    for k in ks:
+        stats = curves[str(k)]
+        print(f"K={k:>2} pass@K={stats['observed_success_at_k']:.1%} "
+              f"mixed@K={stats['mixed_group_rate']:.1%} "
+              f"zero_var={stats['zero_reward_variance_group_rate']:.1%}", flush=True)
+    print(f"recommended_k={recommendation}", flush=True)
+
+
 def evaluate_worker(args):
     from posttrain_math.rollout_records import PilotRunner
 
@@ -347,6 +421,9 @@ def evaluate_worker(args):
 
 def report(root: Path) -> dict:
     result = {'evaluations': {}, 'training_complete': (root / 'rl/complete.json').exists()}
+    support = root / 'support/summary.json'
+    if support.exists():
+        result['support_scan'] = read_json(support)
     lines = ['# RLOO pilot', '', 'Correctness-only RL; fixed 50-step budget by default. No box-rate gate.', '',
              '| Model | Dev cohort | N | Numeric box | Correct | Token limit |',
              '| --- | --- | ---: | ---: | ---: | ---: |']
@@ -390,7 +467,7 @@ def report(root: Path) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('stage', choices=('prepare', 'baseline', 'smoke', 'train', 'evaluate', 'report', 'package'))
+    parser.add_argument('stage', choices=('prepare', 'support', 'baseline', 'smoke', 'train', 'evaluate', 'report', 'package'))
     parser.add_argument('--adapter', type=Path)
     parser.add_argument('--data-dir', type=Path, default=Path('data/processed'))
     parser.add_argument('--output-dir', type=Path, default=Path('runs') / CONTRACT)
@@ -400,12 +477,12 @@ def main():
     parser.add_argument('--max-new-tokens', type=int, default=512)
     parser.add_argument('--precision', choices=('auto', 'fp16', 'bf16', 'fp32'), default='auto')
     parser.add_argument('--num-generations', type=int, default=4)
-    parser.add_argument('--train-levels', type=int, nargs='+', choices=range(1, 6), default=None)
+    parser.add_argument('--levels', type=int, nargs='+', choices=range(1, 6), default=None)
     parser.add_argument('--seed', type=int, default=83)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.train_levels is not None:
-        args.train_levels = sorted(set(args.train_levels))
+    if args.levels is not None:
+        args.levels = sorted(set(args.levels))
     root = args.output_dir
     if args.stage in ('report', 'package'):
         if not root.is_dir():
@@ -424,6 +501,8 @@ def main():
     if args.worker:
         if args.stage in ('smoke', 'train'):
             train_worker(args)
+        elif args.stage == 'support':
+            support_worker(args)
         else:
             evaluate_worker(args)
         return
