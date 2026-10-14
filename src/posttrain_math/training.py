@@ -38,6 +38,7 @@ from posttrain_math.distributed import (
     resolve_gradient_accumulation,
 )
 from posttrain_math.environment import native_bf16_supported
+from posttrain_math.experiment_io import file_hash
 from posttrain_math.prompting import PromptFormatter, get_prompt_formatter
 
 IGNORE_INDEX = -100
@@ -84,7 +85,12 @@ def load_training_tokenizer(model_path: Path):
     return tokenizer
 
 
-def _load_split(data_dir: Path, split: str) -> pd.DataFrame:
+def _load_split(
+    data_dir: Path,
+    split: str,
+    *,
+    levels: tuple[int, ...] | None = None,
+) -> pd.DataFrame:
     path = data_dir / f"{split}.parquet"
     if not path.is_file():
         raise FileNotFoundError(f"Processed split not found: {path}")
@@ -104,11 +110,19 @@ def _load_split(data_dir: Path, split: str) -> pd.DataFrame:
         )
 
     eligible = df["numeric_eligible"].eq(True).fillna(False)
+    if levels is not None:
+        if not levels or any(level not in range(1, 6) for level in levels):
+            raise ValueError("levels must contain integers in 1..5")
+        if "level" not in df.columns:
+            raise ValueError(f"{split}: missing 'level' column")
+        eligible &= df["level"].isin(
+            [f"Level {level}" for level in levels]
+        )
     df = df.loc[eligible].copy()
 
     if df.empty:
         raise ValueError(
-            f"{split}: boxed-numeric-v1 cohort is empty."
+            f"{split}: boxed-numeric-v1 cohort is empty (levels={levels})."
         )
 
     return df.reset_index(drop=True)
@@ -148,8 +162,9 @@ def _encode_split(
     *,
     tokenizer,
     prompt_formatter: PromptFormatter,
+    levels: tuple[int, ...] | None = None,
 ) -> list[EncodedSFTExample]:
-    df = _load_split(data_dir, split)
+    df = _load_split(data_dir, split, levels=levels)
     return [
         encode_sft_example(
             tokenizer,
@@ -256,6 +271,7 @@ def inspect_sft_data(
     max_length: int,
     samples: int,
     seed: int,
+    levels: tuple[int, ...] | None = None,
 ) -> None:
     if max_length <= 0:
         raise ValueError("max_length must be positive.")
@@ -277,6 +293,7 @@ def inspect_sft_data(
             split,
             tokenizer=tokenizer,
             prompt_formatter=prompt_formatter,
+            levels=levels,
         )
         _assert_contract(examples, tokenizer=tokenizer)
         encoded[split] = examples
@@ -316,6 +333,7 @@ def _prepare_examples(
     prompt_formatter: PromptFormatter,
     max_length: int,
     overlong_policy: str,
+    levels: tuple[int, ...] | None = None,
 ) -> list[EncodedSFTExample]:
     if overlong_policy not in {"error", "drop"}:
         raise ValueError("overlong_policy must be 'error' or 'drop'.")
@@ -325,6 +343,7 @@ def _prepare_examples(
         split,
         tokenizer=tokenizer,
         prompt_formatter=prompt_formatter,
+        levels=levels,
     )
     _assert_contract(examples, tokenizer=tokenizer)
 
@@ -904,7 +923,17 @@ def train_sft(
     save_total_limit: int,
     seed: int,
     resume_from_checkpoint: Path | None,
+    levels: tuple[int, ...] | None = None,
+    save_strategy: str = "steps",
 ) -> None:
+    if save_strategy not in {"steps", "epoch"}:
+        raise ValueError("save_strategy must be 'steps' or 'epoch'")
+    if save_strategy == "epoch" and not float(epochs).is_integer():
+        raise ValueError("save_strategy=epoch requires an integer epoch count")
+    if save_strategy == "epoch" and save_total_limit < math.ceil(epochs):
+        raise ValueError(
+            "For save_strategy=epoch, save_total_limit must retain every epoch."
+        )
     if min(batch_size, eval_batch_size) <= 0:
         raise ValueError("batch sizes must be positive.")
     if gradient_accumulation is not None and gradient_accumulation <= 0:
@@ -939,6 +968,7 @@ def train_sft(
         prompt_formatter=formatter,
         max_length=max_length,
         overlong_policy=overlong_policy,
+        levels=levels,
     )
     dev_examples = _prepare_examples(
         data_dir=data_dir,
@@ -947,6 +977,7 @@ def train_sft(
         prompt_formatter=formatter,
         max_length=max_length,
         overlong_policy=overlong_policy,
+        levels=levels,
     )
 
     train_dataset = _to_dataset(train_examples)
@@ -980,6 +1011,8 @@ def train_sft(
         print(f"- model: {model_path}")
         print(f"- prompt: {prompt_name}")
         print(f"- train/dev examples: {len(train_dataset)} / {len(dev_dataset)}")
+        print(f"- levels: {list(levels) if levels is not None else 'all'}")
+        print(f"- checkpoint save strategy: {save_strategy}")
         print(f"- max_length: {max_length}")
         print(f"- train/eval batch size per device: {batch_size} / {eval_batch_size}")
         print(f"- world size: {context.world_size}")
@@ -1008,6 +1041,9 @@ def train_sft(
             "model": str(model_path),
             "prompt": prompt_name,
             "data_dir": str(data_dir),
+            "levels": list(levels) if levels is not None else None,
+            "train_parquet_sha256": file_hash(data_dir / "train.parquet"),
+            "dev_parquet_sha256": file_hash(data_dir / "dev.parquet"),
             "max_length": max_length,
             "overlong_policy": overlong_policy,
             "train_examples": len(train_dataset),
@@ -1041,6 +1077,7 @@ def train_sft(
             "logging_steps": logging_steps,
             "eval_steps": eval_steps,
             "save_steps": save_steps,
+            "save_strategy": save_strategy,
             "save_total_limit": save_total_limit,
             "seed": seed,
             "torch": torch.__version__,
@@ -1089,10 +1126,10 @@ def train_sft(
             logging_steps=logging_steps,
             logging_first_step=True,
             logging_nan_inf_filter=False,
-            eval_strategy="steps",
+            eval_strategy=save_strategy,
             eval_steps=eval_steps,
             eval_on_start=True,
-            save_strategy="steps",
+            save_strategy=save_strategy,
             save_steps=save_steps,
             save_total_limit=save_total_limit,
             report_to="none",
@@ -1136,6 +1173,22 @@ def train_sft(
 
         if context.is_main_process:
             tokenizer.save_pretrained(final_model_dir)
+            if peft_method == "lora":
+                # Checkpoints saved at each epoch must be directly loadable for
+                # inference. PEFT Trainer saves adapter weights but base-model
+                # provenance is normalized by cli.run_train after training.
+                import shutil
+
+                for checkpoint_dir in output_dir.glob("checkpoint-*"):
+                    for filename in (
+                        "tokenizer.json",
+                        "tokenizer_config.json",
+                        "special_tokens_map.json",
+                    ):
+                        source = final_model_dir / filename
+                        target = checkpoint_dir / filename
+                        if source.is_file() and not target.is_file():
+                            shutil.copy2(source, target)
             _plot_history(trainer.state.log_history, output_dir)
 
             checkpoints = sorted(

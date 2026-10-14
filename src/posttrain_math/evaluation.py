@@ -175,6 +175,7 @@ def _metrics_from_records(
     token_diagnostics: dict[str, Any],
     world_size: int,
     per_device_batch_size: int | None,
+    levels: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     counters = {
         "num_examples": 0,
@@ -217,6 +218,7 @@ def _metrics_from_records(
             "excluded_rows": excluded_rows,
             "evaluated_rows": n,
             "limit": limit,
+            **({"levels": list(levels)} if levels is not None else {}),
         },
         "token_diagnostics": token_diagnostics,
         **counters,
@@ -271,6 +273,7 @@ def evaluate(
     output_dir: Path,
     max_new_tokens: int,
     limit: int | None = None,
+    levels: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     if max_new_tokens <= 0:
         raise ValueError("max_new_tokens must be positive")
@@ -281,7 +284,15 @@ def evaluate(
     try:
         source_df = load_eval_split(data_dir, split)
         source_rows = len(source_df)
-        eligible_df = source_df[source_df["numeric_eligible"].astype(bool)].copy()
+        eligible_df = source_df[
+            source_df["numeric_eligible"].eq(True).fillna(False)
+        ].copy()
+        if levels is not None:
+            if not levels or any(level not in range(1, 6) for level in levels):
+                raise ValueError("levels must contain integers in 1..5")
+            eligible_df = eligible_df[
+                eligible_df["level"].isin([f"Level {level}" for level in levels])
+            ].copy()
         eligible_rows = len(eligible_df)
         excluded_rows = source_rows - eligible_rows
         if eligible_rows == 0:
@@ -436,6 +447,7 @@ def evaluate(
                     if per_device_batch_size is not None
                     else None
                 ),
+                levels=levels,
             )
             metrics_path.write_text(
                 json.dumps(metrics, indent=2, ensure_ascii=False) + "\n",

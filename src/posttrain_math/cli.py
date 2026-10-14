@@ -258,6 +258,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     eval_parser.add_argument(
+        "--levels", type=int, nargs="+", choices=range(1, 6), default=None,
+        help="Evaluate only the selected boxed-numeric MATH levels.",
+    )
+
+    eval_parser.add_argument(
         "--split",
         choices=("dev", "test"),
         default="dev",
@@ -314,6 +319,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_training_data_args(
         train_inspect
+    )
+    train_inspect.add_argument(
+        "--levels", type=int, nargs="+", choices=range(1, 6), default=None,
+        help="Filter numeric-eligible train/dev data to specified MATH levels.",
     )
 
     train_inspect.add_argument(
@@ -437,6 +446,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_training_data_args(
         sft_parser
+    )
+    sft_parser.add_argument(
+        "--levels", type=int, nargs="+", choices=range(1, 6), default=None,
+        help="Filter numeric-eligible train/dev data to specified MATH levels.",
+    )
+    sft_parser.add_argument(
+        "--save-strategy", choices=("steps", "epoch"), default="steps",
+        help="Use 'epoch' to retain comparable 1/2/3-epoch SFT adapters.",
     )
 
     sft_parser.add_argument(
@@ -750,6 +767,7 @@ def run_eval(
             args.max_new_tokens
         ),
         limit=args.limit,
+        levels=tuple(sorted(set(args.levels))) if args.levels else None,
     )
 
     return 0
@@ -766,6 +784,7 @@ def run_train(
             max_length=args.max_length,
             samples=args.samples,
             seed=args.seed,
+            levels=tuple(sorted(set(args.levels))) if args.levels else None,
         )
 
         return 0
@@ -911,6 +930,8 @@ def run_train(
             resume_from_checkpoint=(
                 args.resume_from_checkpoint
             ),
+            levels=tuple(sorted(set(args.levels))) if args.levels else None,
+            save_strategy=args.save_strategy,
         )
 
         if (
