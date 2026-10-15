@@ -1,5 +1,6 @@
 from posttrain_math.prompting import (
     PROMPT_STRATEGIES,
+    format_boxed_1shot_prompt,
     format_boxed_cot_prompt,
     format_boxed_prompt,
     format_plain_prompt,
@@ -42,6 +43,7 @@ def test_prompt_strategies_are_registered() -> None:
         "plain",
         "boxed",
         "boxed-cot",
+        "boxed-1shot",
     }
 
 
@@ -59,4 +61,8 @@ def test_get_prompt_formatter() -> None:
     assert (
         get_prompt_formatter("boxed-cot")
         is format_boxed_cot_prompt
+    )
+    assert (
+        get_prompt_formatter("boxed-1shot")
+        is format_boxed_1shot_prompt
     )

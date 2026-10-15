@@ -57,6 +57,29 @@ def format_boxed_cot_prompt(
     )
 
 
+def format_boxed_1shot_prompt(problem: str) -> str:
+    """Fixed example and explicit boxed-answer instruction for L1–3 experiments.
+
+    The example is a hand-written arithmetic question, not a MATH split item.
+    Keep this exact formatter shared by SFT, evaluation and RL rollouts.
+    """
+    problem = _validate_problem(problem)
+    return (
+        "Follow the example below. Solve the problem step by step.\n"
+        "Always end your solution with a final answer in \\boxed{...}.\n\n"
+        "Example:\n"
+        "Problem:\n"
+        "What is 3/4 + 1/4?\n\n"
+        "Solution:\n"
+        "The denominators are equal, so we add the numerators.\n"
+        "3/4 + 1/4 = 4/4 = 1.\n"
+        "Final answer: \\boxed{1}\n\n"
+        "Problem:\n"
+        f"{problem}\n\n"
+        "Solution:\n"
+    )
+
+
 PROMPT_FORMATTERS: dict[
     str,
     PromptFormatter,
@@ -64,6 +87,7 @@ PROMPT_FORMATTERS: dict[
     "plain": format_plain_prompt,
     "boxed": format_boxed_prompt,
     "boxed-cot": format_boxed_cot_prompt,
+    "boxed-1shot": format_boxed_1shot_prompt,
 }
 
 

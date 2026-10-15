@@ -12,6 +12,12 @@ DEFAULT_MODEL_REPO = "allenai/OLMo-2-0425-1B"
 DEFAULT_MODEL_REVISION = "13cece9360d59bb9db636273ea8d000b67fcc27b"
 DEFAULT_MODEL_DIR = Path("models/olmo-2-0425-1b")
 
+# Official full-weight Tülu SFT checkpoint. It is not a LoRA adapter and is
+# distinct from the original OLMo-2 1B base. Pin model AND tokenizer together.
+OFFICIAL_SFT_MODEL_REPO = "allenai/OLMo-2-0425-1B-SFT"
+OFFICIAL_SFT_MODEL_REVISION = "0d85a3d037876ce6ac7d4311d994400fc66ac27f"
+OFFICIAL_SFT_MODEL_DIR = Path("models/olmo-2-0425-1b-sft")
+
 
 def download_model(
     *,
@@ -28,6 +34,16 @@ def download_model(
             manifest_path = output_dir / "source.json"
             config_path = output_dir / "config.json"
             if manifest_path.is_file() and config_path.is_file():
+                existing_source = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if (
+                    existing_source.get("repo_id") != repo_id
+                    or existing_source.get("requested_revision") != revision
+                    or not existing_source.get("resolved_commit")
+                ):
+                    raise ValueError(
+                        "Existing model source does not match requested repo/revision: "
+                        f"{output_dir}. Use a distinct --output-dir or --force."
+                    )
                 print("Model already present; skipping download")
                 print(f"- local directory: {output_dir}")
                 return output_dir

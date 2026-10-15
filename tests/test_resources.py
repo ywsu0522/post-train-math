@@ -45,7 +45,14 @@ def test_download_model_reuses_complete_local_copy(tmp_path, monkeypatch) -> Non
     target = tmp_path / "models" / "model"
     target.mkdir(parents=True)
     (target / "config.json").write_text("{}", encoding="utf-8")
-    (target / "source.json").write_text("{}", encoding="utf-8")
+    (target / "source.json").write_text(
+        json.dumps({
+            "repo_id": "org/model",
+            "requested_revision": resources.DEFAULT_MODEL_REVISION,
+            "resolved_commit": "abc123",
+        }),
+        encoding="utf-8",
+    )
 
     class FailApi:
         def __init__(self, *args, **kwargs):

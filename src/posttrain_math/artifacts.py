@@ -16,6 +16,8 @@ from posttrain_math.resources import (
     DEFAULT_MODEL_DIR,
     DEFAULT_MODEL_REPO,
     DEFAULT_MODEL_REVISION,
+    OFFICIAL_SFT_MODEL_DIR,
+    OFFICIAL_SFT_MODEL_REPO,
 )
 
 BASE_MODEL_SOURCE_FILENAME = "base_model_source.json"
@@ -154,6 +156,9 @@ def resolve_local_base_model(
                 DEFAULT_MODEL_DIR
             )
 
+        if source.get("repo_id") == OFFICIAL_SFT_MODEL_REPO:
+            candidates.append(OFFICIAL_SFT_MODEL_DIR)
+
     seen: set[str] = set()
 
     for candidate in candidates:
@@ -187,13 +192,12 @@ def resolve_local_base_model(
             or DEFAULT_MODEL_REVISION
         )
 
-        output_dir = (
-            DEFAULT_MODEL_DIR
-            if repo_id
-            == DEFAULT_MODEL_REPO
-            else Path("models")
-            / repo_id.rsplit("/", 1)[-1]
-        )
+        if repo_id == DEFAULT_MODEL_REPO:
+            output_dir = DEFAULT_MODEL_DIR
+        elif repo_id == OFFICIAL_SFT_MODEL_REPO:
+            output_dir = OFFICIAL_SFT_MODEL_DIR
+        else:
+            output_dir = Path("models") / repo_id.rsplit("/", 1)[-1]
 
         raise FileNotFoundError(
             "Adapter base model is not "
