@@ -78,7 +78,7 @@ def test_evaluation_uses_fixed_numeric_cohort_and_grouped_accuracy(
         max_new_tokens=128,
     )
 
-    assert metrics["verifier"] == "boxed-numeric-v1"
+    assert metrics["verifier"] == "boxed-numeric-v2"
     assert metrics["cohort"] == {
         "source_rows": 3,
         "eligible_rows": 2,

@@ -4,7 +4,7 @@ Reproducible post-training experiments for mathematical language models. The
 reference pipeline uses OLMo 2 1B and Hendrycks MATH for deterministic data
 preparation, completion-only SFT, boxed-numeric evaluation, and RLVR.
 
-The central evaluation/reward contract is deliberately narrow: **boxed-numeric-v1**.
+The active evaluation/reward contract is **boxed-numeric-v2** (v1 results remain historical).
 Gold solutions are eligible only when they contain exactly one well-formed
 `\boxed{...}` whose content matches the numeric grammar below. Model outputs are scored
 by the final `\boxed{...}` marker with a small deterministic parser based on
@@ -87,7 +87,7 @@ uv run --locked --no-sync posttrain-math data prepare
 Each download records the upstream resolved commit and file SHA256 values.
 `models/`, `data/`, and `runs/` remain gitignored.
 
-## boxed-numeric-v1 cohort
+## boxed-numeric-v2 cohort
 
 `data prepare` retains the full rows used by SFT and adds deterministic cohort
 metadata:
@@ -103,35 +103,41 @@ marker, that marker is well-formed and non-empty, and its content successfully
 parses under this grammar after stripping only leading/trailing whitespace:
 
 ```text
-digits   := [0-9]+
-number   := ["-"] digits ["." digits] ["\%"]
-fraction := ["-"] "\frac{" digits "}{" digits "}"
-answer   := number | fraction
+digits         := [0-9]+
+number         := ["-"] digits ["." digits] ["\%"]
+fraction_latex := ["-"] "\frac{" digits "}{" digits "}"
+fraction_slash := ["-"] digits "/" digits
+answer         := number | fraction_latex | fraction_slash
 ```
 
 The stripped content must full-match `answer`; no internal whitespace is removed.
 Numbers are parsed exactly with `decimal.Decimal`, divided by 100 when the
 optional escaped `\%` suffix is present, then converted to `fractions.Fraction`.
-LaTeX fractions are constructed directly with `Fraction(numerator, denominator)`;
-its native `ZeroDivisionError` is caught as an invalid parse. Both paths return
-canonical `Fraction` values. Examples include `42`, `-17`, `0.5`, `50\%`,
-`\frac{3}{5}`, and `-\frac{3}{5}`. A plus sign, a sign inside fraction braces,
-slash fractions (`3/5`), bare `%`, scientific notation, radicals, symbols, units,
-tuples, intervals, equations, and prose are outside this grammar.
+Both fraction forms are constructed with `Fraction(numerator, denominator)`;
+its native `ZeroDivisionError` is caught as an invalid parse. All accepted forms
+return exact canonical `Fraction` values. Examples include `42`, `-17`, `0.5`,
+`50\%`, `\frac{3}{5}`, `-\frac{3}{5}`, `3/5`, and `-3/5`. A plus sign, signs
+inside fraction braces or after `/`, internal whitespace (`3 / 5`), bare `%`,
+scientific notation, radicals, symbols, units, tuples, intervals, equations,
+and prose are outside this grammar. `9/0` is invalid (zero denominator).
 
-For the pinned 12,500-row source, the cohort audit is:
+Historical **v1-only** audit for the pinned 12,500-row source (NOT v2 counts):
 
-| split | source rows | boxed-numeric-v1 | retention |
+| split | source rows | boxed-numeric-v1 (historical) | retention |
 | --- | ---: | ---: | ---: |
 | source train | 7,500 | 5,586 | 74.48% |
 | test | 5,000 | 3,686 | 73.72% |
 | combined | 12,500 | 9,272 | 74.176% |
 
-These counts were recomputed with `data prepare` using the pinned raw files and
-the current parser. `data download` verifies their revision and SHA256 before
-reuse. The generated `data/processed/manifest.json` records `source_train`,
+Re-run `posttrain-math data prepare --seed 42 --dev-ratio 0.1` after upgrading to
+v2 to obtain the **new** train/dev/test cohort counts from
+`data/processed/manifest.json`. Do not reuse v1's 2,402-train/266-dev counts
+or compare v1 and v2 accuracy as though they were evaluated on the same cohort.
+`data download` verifies the raw revision and SHA256 before reuse. The manifest records `source_train`,
 processed `train`/`dev`, `test`, and `combined` audits; combined counts each source
 row once. No cohort row count is hardcoded in data preparation.
+
+Historical v1 exclusions (NOT v2 counts):
 
 | exclusion | source train | test | combined |
 | --- | ---: | ---: | ---: |
@@ -163,7 +169,7 @@ gold canonical Fraction = 1/2
 prediction = \boxed{\frac{2}{4}} -> correct
 prediction = \boxed{0.5}       -> correct
 prediction = \boxed{50\%}      -> correct
-prediction = \boxed{2/4}       -> incorrect
+prediction = \boxed{2/4}       -> correct (v2)
 prediction = \boxed{\sqrt{1/4}} -> incorrect
 prediction = "answer is 1/2"   -> incorrect
 prediction = \boxed{0.5} then \boxed{1/0} -> incorrect (no fallback)
@@ -230,7 +236,7 @@ bash scripts/launch_gpu.sh auto eval \
   --output-dir runs/evals/olmo2-1b-lora-sft-v1
 ```
 
-Evaluation automatically selects the fixed `boxed-numeric-v1` cohort and writes
+Evaluation automatically selects the fixed `boxed-numeric-v2` cohort and writes
 `predictions.jsonl` plus `metrics.json`. Metrics include accuracy, boxed-output
 rate, `numeric_output_rate`, and accuracy by level/type. Prediction records use
 `prediction_numeric`, and metrics count valid numeric outputs in `num_pred_numeric`.

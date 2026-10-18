@@ -31,7 +31,7 @@ MATH_TRAIN_FILE = "data/train-00000-of-00001.parquet"
 MATH_TEST_FILE = "data/test-00000-of-00001.parquet"
 MATH_TRAIN_SHA256 = "eca6e667f4305dd5e5ba09b4fd55e7f3174a0fbe361cdfd4c44758b593a76933"
 MATH_TEST_SHA256 = "7dca8d6e41af88ecf82f2b5f36eb5530e083aaaa86ee325f62bd5c31535178c6"
-COHORT_NAME = "boxed-numeric-v1"
+COHORT_NAME = "boxed-numeric-v2"
 
 
 def _sha256(path: Path) -> str:
@@ -255,6 +255,28 @@ def download_raw_datasets(
     return train_path, test_path
 
 
+def assert_current_cohort(data_dir: Path) -> None:
+    """Reject stale prepared manifests after a verifier/cohort version change.
+
+    Synthetic parquet fixtures may have no manifest; real `data prepare` runs
+    always write one. A present manifest must unambiguously match this parser.
+    """
+    manifest_path = Path(data_dir) / "manifest.json"
+    if not manifest_path.is_file():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        name = manifest["cohort"]["name"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"Invalid processed cohort manifest: {manifest_path}") from exc
+    if name != COHORT_NAME:
+        raise ValueError(
+            f"Prepared cohort is {name!r}; this code requires {COHORT_NAME!r}. "
+            "Re-run `posttrain-math data prepare --seed 42 --dev-ratio 0.1` "
+            "before training/evaluation. Keep v1 outputs separately."
+        )
+
+
 def load_dataset(path: Path) -> pd.DataFrame:
     path = Path(path)
     if not path.is_file():
@@ -321,7 +343,7 @@ def _classification_columns(classification: NumericGold) -> tuple[Any, ...]:
 
 
 def annotate_numeric_cohort(df: pd.DataFrame) -> pd.DataFrame:
-    """Annotate rows with deterministic boxed-numeric-v1 gold metadata."""
+    """Annotate rows with deterministic boxed-numeric-v2 gold metadata."""
     result = df.copy()
     classifications = [
         classify_boxed_numeric_solution(str(solution))
@@ -497,9 +519,11 @@ def prepare_datasets(
         "definition": (
             "gold solution contains exactly one literal \\boxed marker, "
             "well-formed and non-empty; strip outer whitespace then full-match "
-            "number := -?digits(.digits)?(\\%)? or fraction := -?\\frac{digits}{digits}; "
+            "number := -?digits(.digits)?(\\%)?; "
+            "fraction_latex := -?\\frac{digits}{digits}; "
+            "fraction_slash := -?digits/digits; "
             "digits := [0-9]+; numbers parsed with decimal.Decimal, percentages divided "
-            "by 100; both paths canonicalized with fractions.Fraction; parse failures "
+            "by 100; all paths canonicalized with fractions.Fraction; parse failures "
             "including zero denominators are invalid"
         ),
         "source_train": _cohort_summary(annotated_train),

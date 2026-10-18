@@ -28,7 +28,7 @@ def make_dataset() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=ORIGINAL_COLUMNS)
 
 
-@pytest.mark.parametrize("answer", [r"\frac{6}{8}", "0.7500", r"75\%"])
+@pytest.mark.parametrize("answer", [r"\frac{6}{8}", "6/8", "0.7500", r"75\%"])
 def test_annotate_numeric_cohort(answer: str) -> None:
     df = pd.DataFrame(
         [
@@ -74,17 +74,16 @@ def test_prepare_numeric_metadata_and_cohort_audit(tmp_path: Path, monkeypatch) 
     manifest = json.loads((output / "manifest.json").read_text())
     assert all(manifest["invariants"].values())
     cohort = manifest["cohort"]
-    assert cohort["name"] == "boxed-numeric-v1"
-    assert cohort["source_train"]["eligible_rows"] == 20
+    assert cohort["name"] == "boxed-numeric-v2"
+    assert cohort["source_train"]["eligible_rows"] == 40
     assert cohort["test"]["eligible_rows"] == 20
     assert cohort["combined"]["source_rows"] == 80
-    assert cohort["combined"]["eligible_rows"] == 40
-    assert cohort["combined"]["retention"] == 0.5
+    assert cohort["combined"]["eligible_rows"] == 60
+    assert cohort["combined"]["retention"] == 0.75
     assert cohort["combined"]["exclusion_counts"] == {
-        "non_numeric_boxed": 20,
         "zero_denominator": 20,
     }
-    assert cohort["train"]["eligible_rows"] + cohort["dev"]["eligible_rows"] == 20
+    assert cohort["train"]["eligible_rows"] + cohort["dev"]["eligible_rows"] == 40
     for split in ("train", "dev", "test"):
         frame = pd.read_parquet(output / f"{split}.parquet")
         assert set(frame.columns) == set(ORIGINAL_COLUMNS + data_module.COHORT_COLUMNS)

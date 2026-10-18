@@ -1,6 +1,6 @@
 # RLVR research contract
 
-This project treats mathematical RLVR as **outcome optimization with a deterministic terminal verifier**. The primary reward is `boxed-numeric-v1`: the generated final boxed number or LaTeX fraction is canonicalized to a `Fraction` and compared with gold for binary reward (`1` or `0`). Numbers include decimals and escaped percentages; invalid final boxes receive `0`. No intermediate reasoning step is graded during training.
+This project treats mathematical RLVR as **outcome optimization with a deterministic terminal verifier**. The active primary reward is `boxed-numeric-v2`: the generated final boxed number, LaTeX fraction, or strict slash fraction (`9/4`) is canonicalized to a `Fraction` and compared with gold for binary reward (`1` or `0`). Numbers include decimals and escaped percentages; invalid final boxes receive `0`. No intermediate reasoning step is graded during training. Historical v1 runs exclude slash fractions.
 
 That separation is intentional. The project asks two different questions:
 
@@ -52,7 +52,7 @@ The diagnostic state is a **textual prefix** of a sampled completion. For prompt
 
 `V_hat(x, y_{1:t}) = mean_m R(x, y_{1:t} + continuation_m)`
 
-where fresh continuations are sampled from the frozen policy and scored only by `boxed-numeric-v1` terminal reward.
+where fresh continuations are sampled from the frozen policy and scored only by `boxed-numeric-v2` terminal reward.
 
 Interpretation: `V_hat` estimates how likely the current policy is to reach a correct terminal answer from that textual state. It is not a trained critic, process reward, symbolic proof checker, or hidden-state explanation.
 

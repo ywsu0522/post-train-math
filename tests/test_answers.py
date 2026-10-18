@@ -31,6 +31,8 @@ from posttrain_math.answers import (
         (r"-\frac{6}{8}", Fraction(-3, 4)),
         (r"\frac{006}{008}", Fraction(3, 4)),
         (r"-\frac{0}{8}", Fraction(0)),
+        ("6/8", Fraction(3, 4)),
+        ("-6/8", Fraction(-3, 4)),
     ],
 )
 def test_parse_boxed_numeric(text: str, expected: Fraction) -> None:
@@ -41,8 +43,6 @@ def test_parse_boxed_numeric(text: str, expected: Fraction) -> None:
     "text",
     [
         "+17",
-        "6/8",
-        "-6/8",
         "6/-8",
         ".5",
         "5.",
@@ -151,7 +151,7 @@ def test_boxed_format_classifier() -> None:
     assert classify_boxed_format("answer 2") == "no_boxed"
 
 
-@pytest.mark.parametrize("answer", [r"\frac{2}{4}", "0.5", r"50\%", "0.5000"])
+@pytest.mark.parametrize("answer", [r"\frac{2}{4}", "2/4", "0.5", r"50\%", "0.5000"])
 def test_verify_boxed_numeric_canonicalizes_prediction(answer: str) -> None:
     assert verify_boxed_numeric(
         rf"Reasoning. Final: \boxed{{{answer}}}",
@@ -159,7 +159,7 @@ def test_verify_boxed_numeric_canonicalizes_prediction(answer: str) -> None:
         denominator=2,
     )
     assert not verify_boxed_numeric(
-        r"Reasoning. Final: \boxed{2/4}",
+        r"Reasoning. Final: \boxed{2/5}",
         numerator=1,
         denominator=2,
     )

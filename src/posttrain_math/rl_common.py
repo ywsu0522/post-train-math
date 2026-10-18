@@ -10,6 +10,7 @@ from peft import PeftConfig, PeftModel
 from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
 from posttrain_math.artifacts import resolve_local_base_model
+from posttrain_math.data import assert_current_cohort
 from posttrain_math.environment import native_bf16_supported
 from posttrain_math.prompting import get_prompt_formatter
 
@@ -107,11 +108,12 @@ def build_boxed_numeric_rl_dataset(
     limit_prompts: int | None,
     split: str = "train",
 ) -> tuple[Dataset, dict[str, int]]:
-    """Build the shared boxed-numeric-v1 dataset for RL and diagnostics."""
+    """Build the shared boxed-numeric-v2 dataset for RL and diagnostics."""
     if max_prompt_length <= 0:
         raise ValueError("max_prompt_length must be positive.")
     if split not in {"train", "dev", "test"}:
         raise ValueError(f"Unknown split: {split}")
+    assert_current_cohort(data_dir)
 
     path = data_dir / f"{split}.parquet"
     if not path.is_file():
@@ -171,7 +173,7 @@ def build_boxed_numeric_rl_dataset(
 
     if not records:
         raise ValueError(
-            f"No boxed-numeric-v1 {split} prompts remain after filtering."
+            f"No boxed-numeric-v2 {split} prompts remain after filtering."
         )
 
     stats = {

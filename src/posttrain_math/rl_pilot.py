@@ -200,10 +200,14 @@ def prepare(args):
     import pandas as pd
     from tokenizers import Tokenizer
 
+    from posttrain_math.data import assert_current_cohort
+
+    assert_current_cohort(args.data_dir)
+
     root = args.output_dir
     print('Checking SFT adapter, base provenance and tokenizer...', flush=True)
     validate_initial_adapter(args.adapter)
-    contract = {'contract': CONTRACT, 'algorithm': 'rloo', 'reward': 'boxed-numeric-v1 binary correctness only',
+    contract = {'contract': CONTRACT, 'algorithm': 'rloo', 'reward': 'boxed-numeric-v2 binary correctness only',
                 'options': {name: getattr(args, name) for name in OPTIONS},
                 'sampling': {'temperature': 1.0, 'top_p': 1.0, 'top_k': 0,
                              'num_generations': args.num_generations, 'beta': 0.0},

@@ -10,6 +10,7 @@ import pandas as pd
 from tabulate import tabulate
 
 from posttrain_math.answers import extract_final_boxed, parse_boxed_numeric
+from posttrain_math.data import COHORT_NAME, assert_current_cohort
 from posttrain_math.distributed import (
     barrier,
     destroy_process_group_if_owned,
@@ -35,6 +36,7 @@ def _normalize_optional_string(value: Any) -> str | None:
 def load_eval_split(data_dir: Path, split: str) -> pd.DataFrame:
     if split not in {"dev", "test"}:
         raise ValueError("Evaluation split must be 'dev' or 'test'")
+    assert_current_cohort(data_dir)
 
     path = data_dir / f"{split}.parquet"
     if not path.is_file():
@@ -205,7 +207,7 @@ def _metrics_from_records(
     return {
         "split": split,
         "prompt_strategy": prompt_name,
-        "verifier": "boxed-numeric-v1",
+        "verifier": "boxed-numeric-v2",
         "generator": generator_metadata,
         "distributed": {
             "world_size": world_size,
@@ -296,7 +298,7 @@ def evaluate(
         eligible_rows = len(eligible_df)
         excluded_rows = source_rows - eligible_rows
         if eligible_rows == 0:
-            raise ValueError(f"{split}: boxed-numeric-v1 evaluation cohort is empty")
+            raise ValueError(f"{split}: boxed-numeric-v2 evaluation cohort is empty")
 
         if limit is not None:
             if limit <= 0:
@@ -323,7 +325,7 @@ def evaluate(
             )
             print()
             print("Evaluation cohort")
-            print("  verifier:      boxed-numeric-v1")
+            print("  verifier:      boxed-numeric-v2")
             print(f"  source rows:   {source_rows}")
             print(f"  eligible rows: {eligible_rows}")
             print(f"  excluded rows: {excluded_rows}")

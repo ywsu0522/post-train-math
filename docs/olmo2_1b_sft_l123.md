@@ -31,6 +31,8 @@ uv run --locked --no-sync posttrain-math doctor
 
 ## Download both full-model sources and prepare MATH
 
+This repo now uses `boxed-numeric-v2`, which additionally admits strict slash fractions (`9/4`). Re-run `data prepare` with `seed=42, dev_ratio=0.1` using this code before any new evaluation/training. Historical 2,402-train/266-dev cohort counts were for v1. Do not append v2 predictions to v1 metrics; run a fresh baseline with matching v2 data and verifier.
+
 ```bash
 uv run --locked --no-sync posttrain-math model download \
   --repo-id allenai/OLMo-2-0425-1B-SFT \
@@ -55,9 +57,9 @@ uv run --locked --no-sync posttrain-math eval \
   --output-dir runs/eval-official-sft-l123-1shot
 ```
 
-Report: `num_correct/266`, `accuracy`, `boxed_output_rate`, `numeric_output_rate`, and `accuracy_by_level`. Save **both** `metrics.json` and `predictions.jsonl`. Run the same command with prior `checkpoint-302` and `checkpoint-453`, changing model/output paths only, to obtain a paired comparison under the *same* prompt (their historical `boxed` results must not be compared as though the prompt were equal).
+Report: `num_correct/N`, `accuracy`, `boxed_output_rate`, `numeric_output_rate`, and `accuracy_by_level`. Under v2, N may differ from the historical 266 (v1). Save **both** `metrics.json` and `predictions.jsonl`. Run the same command with prior `checkpoint-302` and `checkpoint-453`, changing model/output paths only, to obtain a paired comparison under the *same* prompt (their historical `boxed` results must not be compared as though the prompt were equal).
 
-A small `--limit 4` smoke test is permissible before full evaluation but do not confuse it with the final 266-question result.
+A small `--limit 4` smoke test is permissible before full evaluation but do not confuse it with the full v2 dev cohort.
 
 ## B. Optional: LoRA SFT of the *official full SFT* on the same L1–3 numeric cohort
 
@@ -85,7 +87,7 @@ Evaluate each epoch with `posttrain-math eval --model runs/official-sft-plus-l12
 
 ## Fair-comparison and RL requirements
 
-1. Same MATH prepare contract (`seed=42`, `dev_ratio=0.1`), numeric-eligible L1–3 dev, prompt, `max_new_tokens=512`, greedy decoding and `boxed-numeric-v1` verifier for all rows.
+1. Same MATH prepare contract (`seed=42`, `dev_ratio=0.1`), numeric-eligible L1–3 dev, prompt, `max_new_tokens=512`, greedy decoding and `boxed-numeric-v2` verifier for all rows.
 2. Separate the conditions clearly: **official SFT as-is**; **official SFT + L1–3 LoRA**; **original-base + L1–3 LoRA**. Changes in initialization and supervision history are **not** controlled by matching inference prompts alone.
 3. Prefer a **train-side**, held-out-from-dev sampled `G=16` probe after greedy evaluation before choosing an RL start. Greedy format/accuracy by themselves do not measure signal-bearing groups.
 4. The current `train_rl` expects an **existing LoRA adapter**, not a full-model SFT checkpoint. Stage B produces one. If you want to run RL *directly* on the official SFT with no extra SFT, bootstrap a zero-update LoRA adapter in a separate, tested step first; do not silently treat a full checkpoint as an adapter.

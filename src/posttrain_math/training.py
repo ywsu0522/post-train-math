@@ -33,6 +33,7 @@ from transformers import (
 )
 from trl import SFTConfig, SFTTrainer
 
+from posttrain_math.data import COHORT_NAME, assert_current_cohort
 from posttrain_math.distributed import (
     get_distributed_context,
     resolve_gradient_accumulation,
@@ -91,6 +92,7 @@ def _load_split(
     *,
     levels: tuple[int, ...] | None = None,
 ) -> pd.DataFrame:
+    assert_current_cohort(data_dir)
     path = data_dir / f"{split}.parquet"
     if not path.is_file():
         raise FileNotFoundError(f"Processed split not found: {path}")
@@ -122,7 +124,7 @@ def _load_split(
 
     if df.empty:
         raise ValueError(
-            f"{split}: boxed-numeric-v1 cohort is empty (levels={levels})."
+            f"{split}: boxed-numeric-v2 cohort is empty (levels={levels})."
         )
 
     return df.reset_index(drop=True)
@@ -1039,6 +1041,7 @@ def train_sft(
         run_config = {
             "git_commit": _git_commit(),
             "model": str(model_path),
+            "cohort": COHORT_NAME,
             "prompt": prompt_name,
             "data_dir": str(data_dir),
             "levels": list(levels) if levels is not None else None,

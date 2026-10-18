@@ -361,7 +361,7 @@ def train_rl(
         "model": str(model_path),
         "base_model": str(base_model_path),
         "data_dir": str(data_dir),
-        "cohort": "boxed-numeric-v1",
+        "cohort": "boxed-numeric-v2",
         "prompt": prompt_name,
         "data": data_stats,
         "max_steps": max_steps,
@@ -381,7 +381,7 @@ def train_rl(
             "top_k": 0,
         },
         "reward": {
-            "verifier": "boxed-numeric-v1",
+            "verifier": "boxed-numeric-v2",
             "correct": 1.0,
             "otherwise": 0.0,
             "process_supervision": False,
@@ -427,7 +427,7 @@ def train_rl(
         print(f"- max steps: {max_steps}")
         print(f"- learning rate: {learning_rate}")
         print("- LR scheduler: constant; warmup_steps=0")
-        print("- reward: boxed-numeric-v1 binary {0,1}; no process reward")
+        print("- reward: boxed-numeric-v2 binary {0,1}; no process reward")
         print(f"- sampling: temperature={temperature}, top_p={top_p}")
         print(f"- KL beta: {beta}")
         print(f"- precision: {precision}")

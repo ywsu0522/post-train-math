@@ -28,7 +28,7 @@ def score_boxed_numeric_completion(
     numerator: int,
     denominator: int,
 ) -> float:
-    """Return the boxed-numeric-v1 binary terminal reward for one completion."""
+    """Return the boxed-numeric-v2 binary terminal reward for one completion."""
     denominator = int(denominator)
     if denominator == 0:
         raise RuntimeError("RL dataset contains a zero gold denominator.")
@@ -38,7 +38,7 @@ def score_boxed_numeric_completion(
 
 
 def make_boxed_numeric_reward():
-    """Build the callable reward shared by all boxed-numeric-v1 RL backends."""
+    """Build the callable reward shared by all boxed-numeric-v2 RL backends."""
 
     def boxed_numeric_reward(
         completions,

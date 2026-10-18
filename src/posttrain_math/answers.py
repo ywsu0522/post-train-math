@@ -9,6 +9,7 @@ _NUMBER_RE = re.compile(r"(-?[0-9]+(?:\.[0-9]+)?)(\\%)?")
 _LATEX_FRACTION_RE = re.compile(
     r"(-?)\\frac\{([0-9]+)\}\{([0-9]+)\}"
 )
+_SLASH_FRACTION_RE = re.compile(r"(-?)([0-9]+)/([0-9]+)")
 
 
 @dataclass(frozen=True)
@@ -170,12 +171,13 @@ def _parse_boxed_numeric_with_reason(
                     number /= 100
             return Fraction(number), None
 
-        latex_match = _LATEX_FRACTION_RE.fullmatch(value)
-        if latex_match is not None:
-            outer_sign = -1 if latex_match.group(1) == "-" else 1
-            numerator = outer_sign * int(latex_match.group(2))
-            denominator = int(latex_match.group(3))
-            return Fraction(numerator, denominator), None
+        for pattern in (_LATEX_FRACTION_RE, _SLASH_FRACTION_RE):
+            fraction_match = pattern.fullmatch(value)
+            if fraction_match is not None:
+                outer_sign = -1 if fraction_match.group(1) == "-" else 1
+                numerator = outer_sign * int(fraction_match.group(2))
+                denominator = int(fraction_match.group(3))
+                return Fraction(numerator, denominator), None
     except ZeroDivisionError:
         return None, "zero_denominator"
     except (ValueError, DecimalException):
@@ -185,19 +187,20 @@ def _parse_boxed_numeric_with_reason(
 
 
 def parse_boxed_numeric(text: str | None) -> Fraction | None:
-    """Parse the boxed-numeric-v1 answer grammar.
+    """Parse the boxed-numeric-v2 answer grammar.
 
     Strip outer whitespace, then full-match a number (optional minus, digits,
-    optional decimal digits, optional ``\\%``) or ``-?\\frac{digits}{digits}``.
-    Numbers use Decimal, percentages divide by 100, and both paths produce
-    canonical Fractions. Parse failures, including zero denominators, are invalid.
+    optional decimal digits, optional ``\\%``), a LaTeX fraction
+    ``-?\\frac{digits}{digits}``, or a slash fraction ``-?digits/digits``.
+    Numbers use Decimal; all accepted forms produce exact canonical Fractions.
+    Internal whitespace and zero denominators are invalid.
     """
     value, _ = _parse_boxed_numeric_with_reason(text)
     return value
 
 
 def classify_boxed_numeric_solution(solution: str) -> NumericGold:
-    """Classify a gold MATH solution for the boxed-numeric-v1 cohort."""
+    """Classify a gold MATH solution for the boxed-numeric-v2 cohort."""
     scan = scan_boxed(solution)
 
     if scan.marker_count == 0:
