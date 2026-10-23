@@ -28,15 +28,32 @@ from post_train_math.data import COHORT_NAME, assert_current_cohort
 )
 def test_slash_fraction_is_exact(content, expected):
     assert parse_boxed_numeric(content) == expected
-    assert extract_final_boxed_numeric(r"Reasoning. \boxed{" + content + "}") == expected
+    assert (
+        extract_final_boxed_numeric(r"Reasoning. \boxed{" + content + "}") == expected
+    )
 
 
 @pytest.mark.parametrize(
     "content",
     [
-        "9/0", "9/00", "9/-4", "+9/4", "9/+4", "9/4/2", "9 / 4",
-        "9/ 4", "9 /4", "9/4 apples", "9/4=2.25", "9//4", "1e2/3",
-        "9.0/4", "/4", "9/", r"\sqrt{9/4}", "9/4%",
+        "9/0",
+        "9/00",
+        "9/-4",
+        "+9/4",
+        "9/+4",
+        "9/4/2",
+        "9 / 4",
+        "9/ 4",
+        "9 /4",
+        "9/4 apples",
+        "9/4=2.25",
+        "9//4",
+        "1e2/3",
+        "9.0/4",
+        "/4",
+        "9/",
+        r"\sqrt{9/4}",
+        "9/4%",
     ],
 )
 def test_slash_fraction_refuses_ambiguous_or_invalid_forms(content):
@@ -49,8 +66,14 @@ def test_cohort_gold_accepts_slash_but_preserves_single_box_rule():
     assert gold.gt_boxed == "9/4"
     assert gold.numerator == 9
     assert gold.denominator == 4
-    assert classify_boxed_numeric_solution(r"\boxed{9/0}").exclusion_reason == "zero_denominator"
-    assert classify_boxed_numeric_solution(r"\boxed{1} \boxed{9/4}").exclusion_reason == "multiple_boxed"
+    assert (
+        classify_boxed_numeric_solution(r"\boxed{9/0}").exclusion_reason
+        == "zero_denominator"
+    )
+    assert (
+        classify_boxed_numeric_solution(r"\boxed{1} \boxed{9/4}").exclusion_reason
+        == "multiple_boxed"
+    )
     assert not classify_boxed_numeric_solution(r"\boxed{9 / 4}").eligible
 
 

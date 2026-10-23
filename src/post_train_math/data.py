@@ -32,6 +32,20 @@ MATH_TEST_FILE = "data/test-00000-of-00001.parquet"
 MATH_TRAIN_SHA256 = "eca6e667f4305dd5e5ba09b4fd55e7f3174a0fbe361cdfd4c44758b593a76933"
 MATH_TEST_SHA256 = "7dca8d6e41af88ecf82f2b5f36eb5530e083aaaa86ee325f62bd5c31535178c6"
 COHORT_NAME = "boxed-numeric-v2"
+PIPELINE = ["split_raw_train", "annotate_each_split", "filter_numeric_eligible"]
+FROZEN_PROCESSED_SHA256 = {
+    "train": "89cefedbc66bb6b4095d1ca03336fc23dbeaf9a03b298027560428081390b2f0",
+    "dev": "e11a6890bdccc69f8bbaa654ebba7816e12d12b1ac01d23f7782b435609c489f",
+    "test": "212692024d4104b5ab778738e5dd618ca4514e1d85d8290d2735bc8554e0bcc0",
+}
+COHORT_DEFINITION = (
+    "gold solution contains exactly one literal \\boxed marker, well-formed and non-empty; "
+    "strip outer whitespace then full-match number := -?digits(.digits)?(\\%)?; "
+    "fraction_latex := -?\\frac{digits}{digits}; fraction_slash := -?digits/digits; "
+    "digits := [0-9]+; numbers parsed with decimal.Decimal, percentages divided by 100; "
+    "all paths canonicalized with fractions.Fraction; parse failures including zero "
+    "denominators are invalid"
+)
 
 
 def _sha256(path: Path) -> str:
@@ -46,14 +60,10 @@ def _read_download_manifest(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            f"Could not read raw dataset manifest: {path}"
-        ) from exc
+        raise RuntimeError(f"Could not read raw dataset manifest: {path}") from exc
 
     if not isinstance(value, dict):
-        raise TypeError(
-            f"Raw dataset manifest must contain a JSON object: {path}"
-        )
+        raise TypeError(f"Raw dataset manifest must contain a JSON object: {path}")
     return value
 
 
@@ -69,10 +79,7 @@ def _validate_existing_raw_dataset(
     errors: list[str] = []
 
     if manifest.get("repo_id") != repo_id:
-        errors.append(
-            "repo_id mismatch: "
-            f"{manifest.get('repo_id')!r} != {repo_id!r}"
-        )
+        errors.append(f"repo_id mismatch: {manifest.get('repo_id')!r} != {repo_id!r}")
 
     if manifest.get("requested_revision") != revision:
         errors.append(
@@ -103,14 +110,12 @@ def _validate_existing_raw_dataset(
 
     if manifest_train_sha256 != actual_train_sha256:
         errors.append(
-            "train SHA256 mismatch: "
-            f"{actual_train_sha256} != {manifest_train_sha256}"
+            f"train SHA256 mismatch: {actual_train_sha256} != {manifest_train_sha256}"
         )
 
     if manifest_test_sha256 != actual_test_sha256:
         errors.append(
-            "test SHA256 mismatch: "
-            f"{actual_test_sha256} != {manifest_test_sha256}"
+            f"test SHA256 mismatch: {actual_test_sha256} != {manifest_test_sha256}"
         )
 
     if repo_id == MATH_DATASET_REPO and revision == MATH_DATASET_REVISION:
@@ -148,7 +153,9 @@ def download_raw_datasets(
     test_path = output_dir / "math_test.parquet"
     manifest_path = output_dir / "download_manifest.json"
 
-    existing = [path for path in (train_path, test_path, manifest_path) if path.exists()]
+    existing = [
+        path for path in (train_path, test_path, manifest_path) if path.exists()
+    ]
     complete = train_path.is_file() and test_path.is_file() and manifest_path.is_file()
     if complete and not force:
         _validate_existing_raw_dataset(
@@ -259,7 +266,9 @@ def assert_current_cohort(data_dir: Path) -> None:
     """Require an explicit manifest matching the current cohort."""
     manifest_path = Path(data_dir) / "manifest.json"
     if not manifest_path.is_file():
-        raise ValueError(f"Missing processed cohort manifest: {manifest_path}; run data prepare")
+        raise ValueError(
+            f"Missing processed cohort manifest: {manifest_path}; run data prepare"
+        )
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         name = manifest["cohort"]["name"]
@@ -303,28 +312,6 @@ def _assert_preparable(df: pd.DataFrame, name: str) -> None:
         counts = _column_error_counts(df[column])
         if any(counts.values()):
             raise ValueError(f"{name}: invalid values in column '{column}': {counts}")
-
-
-def inspect_raw_datasets(train_path: Path, test_path: Path) -> None:
-    raw_train = load_dataset(train_path)
-    raw_test = load_dataset(test_path)
-    _assert_preparable(raw_train, "Raw train")
-    _assert_preparable(raw_test, "Raw test")
-
-    for name, df in (("Raw train", raw_train), ("Raw test", raw_test)):
-        duplicate_rows = int(df.duplicated(subset=ORIGINAL_COLUMNS, keep="first").sum())
-        cohort = annotate_numeric_cohort(df)
-        eligible = int(cohort["numeric_eligible"].sum())
-        print(name)
-        print(f"  rows: {len(df)}")
-        print(f"  duplicated rows: {duplicate_rows}")
-        print(f"  {COHORT_NAME}: {eligible} ({eligible / len(df):.2%})")
-        print(f"  exclusions: {_exclusion_counts(cohort)}")
-        print()
-
-    overlap = set(raw_train["problem"].astype(str)) & set(raw_test["problem"].astype(str))
-    print("Raw train/test")
-    print(f"  exact problem overlap: {len(overlap)} [{'PASS' if not overlap else 'FAIL'}]")
 
 
 def _classification_columns(classification: NumericGold) -> tuple[Any, ...]:
@@ -378,55 +365,22 @@ def _same_rows_unordered(
     right: pd.DataFrame,
     columns: list[str],
 ) -> bool:
-    left_hashes = pd.util.hash_pandas_object(left[columns], index=False).value_counts().sort_index()
-    right_hashes = pd.util.hash_pandas_object(right[columns], index=False).value_counts().sort_index()
+    left_hashes = (
+        pd.util.hash_pandas_object(left[columns], index=False)
+        .value_counts()
+        .sort_index()
+    )
+    right_hashes = (
+        pd.util.hash_pandas_object(right[columns], index=False)
+        .value_counts()
+        .sort_index()
+    )
     return left_hashes.equals(right_hashes)
 
 
 def _exclusion_counts(df: pd.DataFrame) -> dict[str, int]:
     values = df.loc[~df["numeric_eligible"], "numeric_exclusion"].dropna().astype(str)
     return dict(sorted(Counter(values).items()))
-
-
-def _cohort_cell_stats(df: pd.DataFrame) -> dict[str, Any]:
-    source_counts = df.groupby(["type", "level"], dropna=False).size()
-    cohort_df = df[df["numeric_eligible"]]
-    cohort_counts = cohort_df.groupby(["type", "level"], dropna=False).size()
-    source_total = len(df)
-    cohort_total = len(cohort_df)
-
-    cells: list[dict[str, Any]] = []
-    abs_drift_sum = 0.0
-    max_abs_drift = 0.0
-    for problem_type, level in sorted(source_counts.index, key=lambda key: (str(key[0]), str(key[1]))):
-        source_count = int(source_counts.loc[(problem_type, level)])
-        cohort_count = int(cohort_counts.get((problem_type, level), 0))
-        source_share = 100.0 * source_count / source_total if source_total else 0.0
-        cohort_share = 100.0 * cohort_count / cohort_total if cohort_total else 0.0
-        drift = cohort_share - source_share
-        abs_drift_sum += abs(drift)
-        max_abs_drift = max(max_abs_drift, abs(drift))
-        cells.append(
-            {
-                "type": str(problem_type),
-                "level": str(level),
-                "source_count": source_count,
-                "cohort_count": cohort_count,
-                "retention": cohort_count / source_count if source_count else 0.0,
-                "source_share_pct": source_share,
-                "cohort_share_pct": cohort_share,
-                "share_drift_pp": drift,
-            }
-        )
-
-    return {
-        "source_rows": source_total,
-        "cohort_rows": cohort_total,
-        "retention": cohort_total / source_total if source_total else 0.0,
-        "max_abs_share_drift_pp": max_abs_drift,
-        "total_variation_shift_pct": abs_drift_sum / 2.0,
-        "cells": cells,
-    }
 
 
 def _cohort_summary(df: pd.DataFrame) -> dict[str, Any]:
@@ -437,7 +391,6 @@ def _cohort_summary(df: pd.DataFrame) -> dict[str, Any]:
         "excluded_rows": len(df) - eligible,
         "retention": eligible / len(df) if len(df) else 0.0,
         "exclusion_counts": _exclusion_counts(df),
-        "type_level": _cohort_cell_stats(df),
     }
 
 
@@ -446,9 +399,11 @@ def prepare_datasets(
     test_path: Path,
     output_dir: Path,
     *,
-    seed: int,
-    dev_ratio: float,
+    seed: int = 42,
+    dev_ratio: float = 0.1,
 ) -> None:
+    if seed != 42 or dev_ratio != 0.1:
+        raise ValueError("The frozen split requires seed=42 and dev_ratio=0.1")
     source_hashes = {"train": _sha256(train_path), "test": _sha256(test_path)}
     if source_hashes != {"train": MATH_TRAIN_SHA256, "test": MATH_TEST_SHA256}:
         raise ValueError(
@@ -470,24 +425,29 @@ def prepare_datasets(
             f"Raw test row count is {len(raw_test)}, expected {EXPECTED_RAW_TEST_ROWS}"
         )
 
-    overlap = set(raw_train["problem"].astype(str)) & set(raw_test["problem"].astype(str))
+    overlap = set(raw_train["problem"].astype(str)) & set(
+        raw_test["problem"].astype(str)
+    )
     if overlap:
         raise ValueError(f"Raw train/test problem overlap detected: {len(overlap)}")
 
-    annotated_train = annotate_numeric_cohort(raw_train)
-    annotated_test = annotate_numeric_cohort(raw_test).reset_index(drop=True)
-
-    train_df, dev_df = split_raw_train(
-        annotated_train,
-        seed=seed,
-        dev_ratio=dev_ratio,
+    # Split the entire raw train BEFORE looking at answer eligibility.
+    # Keep excluded rows in these files so original membership stays auditable.
+    raw_train_split, raw_dev_split = split_raw_train(
+        raw_train, seed=seed, dev_ratio=dev_ratio
     )
-    test_df = annotated_test
+    train_df = annotate_numeric_cohort(raw_train_split)
+    dev_df = annotate_numeric_cohort(raw_dev_split)
+    test_df = annotate_numeric_cohort(raw_test).reset_index(drop=True)
+    annotated_train = annotate_numeric_cohort(raw_train)
+    annotated_test = test_df
 
     annotated_columns = [*ORIGINAL_COLUMNS, *COHORT_COLUMNS]
     recovered = pd.concat([train_df, dev_df], ignore_index=True)
     invariants = {
-        "train_dev_disjoint": set(train_df["problem"]).isdisjoint(set(dev_df["problem"])),
+        "train_dev_disjoint": set(train_df["problem"]).isdisjoint(
+            set(dev_df["problem"])
+        ),
         "recover_annotated_raw_train": _same_rows_unordered(
             recovered,
             annotated_train,
@@ -518,16 +478,7 @@ def prepare_datasets(
 
     cohort_manifest = {
         "name": COHORT_NAME,
-        "definition": (
-            "gold solution contains exactly one literal \\boxed marker, "
-            "well-formed and non-empty; strip outer whitespace then full-match "
-            "number := -?digits(.digits)?(\\%)?; "
-            "fraction_latex := -?\\frac{digits}{digits}; "
-            "fraction_slash := -?digits/digits; "
-            "digits := [0-9]+; numbers parsed with decimal.Decimal, percentages divided "
-            "by 100; all paths canonicalized with fractions.Fraction; parse failures "
-            "including zero denominators are invalid"
-        ),
+        "definition": COHORT_DEFINITION,
         "source_train": _cohort_summary(annotated_train),
         "train": _cohort_summary(train_df),
         "dev": _cohort_summary(dev_df),
@@ -537,6 +488,7 @@ def prepare_datasets(
         ),
     }
     manifest: dict[str, Any] = {
+        "pipeline": PIPELINE,
         "source": {
             "repo_id": MATH_DATASET_REPO,
             "revision": MATH_DATASET_REVISION,
@@ -580,5 +532,51 @@ def prepare_datasets(
         ("test", test_df),
     ):
         eligible = int(frame["numeric_eligible"].sum())
-        print(f"- {COHORT_NAME} {name}: {eligible}/{len(frame)} ({eligible / len(frame):.2%})")
+        print(
+            f"- {COHORT_NAME} {name}: {eligible}/{len(frame)} ({eligible / len(frame):.2%})"
+        )
     print(f"- manifest: {manifest_path}")
+
+
+def validate_processed_manifest(data_dir: Path) -> tuple[dict, str]:
+    assert_current_cohort(data_dir)
+    payload = (data_dir / "manifest.json").read_bytes()
+    manifest = json.loads(payload)
+    if manifest.get("split") != {
+        "seed": 42,
+        "dev_ratio": 0.1,
+        "stratify": ["type", "level"],
+    }:
+        raise ValueError("Expected the fixed seed=42, dev_ratio=0.1, type/level split")
+    expected_source = {
+        "repo_id": MATH_DATASET_REPO,
+        "revision": MATH_DATASET_REVISION,
+        "sha256": {"train": MATH_TRAIN_SHA256, "test": MATH_TEST_SHA256},
+    }
+    if manifest.get("source") != expected_source:
+        raise ValueError(
+            "Prepared data lacks verified pinned-source provenance; rerun data prepare"
+        )
+    if manifest.get("pipeline") != PIPELINE:
+        raise ValueError("Expected split-before-filter pipeline; rerun data prepare")
+    if manifest.get("cohort", {}).get("definition") != COHORT_DEFINITION:
+        raise ValueError(
+            "Gold solution must have exactly one complete nonempty numeric box"
+        )
+    if manifest.get("processed_sha256") != FROZEN_PROCESSED_SHA256:
+        raise ValueError("Prepared files differ from the frozen cohort")
+    for split in ("train", "dev", "test"):
+        actual = hashlib.sha256(
+            (data_dir / f"{split}.parquet").read_bytes()
+        ).hexdigest()
+        if actual != manifest.get("processed_sha256", {}).get(split):
+            raise ValueError(f"Prepared {split} SHA256 mismatch; rerun data prepare")
+    return manifest, hashlib.sha256(payload).hexdigest()
+
+
+def load_cohort(data_dir: Path, split: str) -> pd.DataFrame:
+    """Filter a previously split, verified file with the common v2 gold rule."""
+    if split not in ("train", "dev", "test"):
+        raise ValueError(f"Unknown split: {split}")
+    frame = load_dataset(Path(data_dir) / f"{split}.parquet")
+    return frame.loc[frame["numeric_eligible"]].reset_index(drop=True)

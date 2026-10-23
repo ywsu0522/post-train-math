@@ -6,9 +6,7 @@ from decimal import Decimal, DecimalException, localcontext
 from fractions import Fraction
 
 _NUMBER_RE = re.compile(r"(-?[0-9]+(?:\.[0-9]+)?)(\\%)?")
-_LATEX_FRACTION_RE = re.compile(
-    r"(-?)\\frac\{([0-9]+)\}\{([0-9]+)\}"
-)
+_LATEX_FRACTION_RE = re.compile(r"(-?)\\frac\{([0-9]+)\}\{([0-9]+)\}")
 _SLASH_FRACTION_RE = re.compile(r"(-?)([0-9]+)/([0-9]+)")
 
 
@@ -242,3 +240,21 @@ def verify_boxed_numeric(
         raise ValueError("Gold denominator must be non-zero.")
     prediction = extract_final_boxed_numeric(completion)
     return prediction == Fraction(numerator, denominator)
+
+
+def numeric_reward(completions, gt_numerator, gt_denominator, **kwargs) -> list[float]:
+    """TRL reward: exact numeric equality of the final box, worth 0 or 1."""
+    rewards = []
+    for completion, numerator, denominator in zip(
+        completions, gt_numerator, gt_denominator, strict=True
+    ):
+        if isinstance(completion, list):
+            completion = "".join(message["content"] for message in completion)
+        rewards.append(
+            float(
+                verify_boxed_numeric(
+                    completion, numerator=int(numerator), denominator=int(denominator)
+                )
+            )
+        )
+    return rewards

@@ -1,94 +1,170 @@
-"""The project exposes only frozen data preparation and candidate evaluation."""
+"""Four workflows: data, model, eval, train."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 
-from post_train_math.baselines import MODELS, make_chat_prompt
+from post_train_math.models import MODELS
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="post-train-math")
     commands = parser.add_subparsers(dest="command", required=True)
-    data = commands.add_parser("data").add_subparsers(dest="data_command", required=True)
-    download = data.add_parser("download", help="Download the pinned MATH source.")
+    data = commands.add_parser("data").add_subparsers(
+        dest="data_command", required=True
+    )
+    download = data.add_parser("download", help="Download the pinned raw MATH source")
     download.add_argument("--output-dir", type=Path, default=Path("data/raw"))
     download.add_argument("--force", action="store_true")
-    prepare = data.add_parser("prepare", help="Verify source and prepare the fixed cohort.")
+    prepare = data.add_parser(
+        "prepare", help="Split raw data, then apply boxed-numeric-v2"
+    )
     prepare.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
     prepare.add_argument("--output-dir", type=Path, default=Path("data/processed"))
-
-    model = commands.add_parser("model").add_subparsers(dest="model_command", required=True)
-    download_model = model.add_parser("download")
-    download_model.add_argument("--model-key", choices=tuple(MODELS), required=True)
-    download_model.add_argument("--output-dir", type=Path)
-
-    evaluate = commands.add_parser("eval", help="Evaluate a pinned candidate on boxed-numeric-v2 dev.")
-    evaluate.add_argument("--model-key", choices=tuple(MODELS), required=True)
-    evaluate.add_argument("--model-dir", type=Path)
-    evaluate.add_argument("--data-dir", type=Path, default=Path("data/processed"))
-    evaluate.add_argument("--output-dir", type=Path, required=True)
-    evaluate.add_argument("--batch-size", type=int, default=1)
-    evaluate.add_argument("--max-new-tokens", type=int, default=1024)
-    evaluate.add_argument("--limit", type=int, help="Smoke evaluation only; omit for the full cohort.")
+    model = commands.add_parser("model").add_subparsers(
+        dest="model_command", required=True
+    )
+    model_download = model.add_parser("download")
+    model_download.add_argument("--model-key", choices=tuple(MODELS), required=True)
+    model_download.add_argument("--output-dir", type=Path)
+    for name in ("eval", "train"):
+        command = commands.add_parser(name)
+        command.add_argument("--model-key", choices=tuple(MODELS), required=True)
+        command.add_argument("--model-dir", type=Path)
+        command.add_argument("--data-dir", type=Path, default=Path("data/processed"))
+        command.add_argument("--output-dir", type=Path, required=True)
+        if name == "eval":
+            command.add_argument("--split", choices=("dev", "test"), default="dev")
+            command.add_argument("--adapter-dir", type=Path)
+            command.add_argument("--batch-size", type=int, default=1)
+            command.add_argument("--limit", type=int, help="Smoke evaluation only")
+        else:
+            command.add_argument(
+                "--prompts-per-update", type=int, default=8, help="Global B"
+            )
+            command.add_argument(
+                "--rollouts", type=int, default=4, help="R per prompt, >= 2"
+            )
+            command.add_argument(
+                "--micro-batch", type=int, default=1, help="Sequences/device"
+            )
+            command.add_argument("--max-steps", type=int, default=100)
+            command.add_argument("--learning-rate", type=float, default=1e-5)
     return parser
 
 
-def run_eval(args: argparse.Namespace) -> None:
-    from post_train_math.baselines import (
+def run_eval(args) -> None:
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    from post_train_math.answers import verify_boxed_numeric
+    from post_train_math.data import load_cohort, validate_processed_manifest
+    from post_train_math.models import (
+        load_tokenizer,
+        make_chat_prompt,
         validate_model_source,
-        validate_processed_manifest,
     )
-    from post_train_math.data import COHORT_NAME
-    from post_train_math.evaluation import evaluate
-    from post_train_math.modeling import HFModelRunner
+    from post_train_math.rloo import MAX_COMPLETION_LENGTH, MAX_PROMPT_LENGTH
 
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
-    if args.limit is not None and args.limit <= 0:
-        raise ValueError("limit must be positive")
-    if args.batch_size <= 0 or args.max_new_tokens <= 0:
-        raise ValueError("batch-size and max-new-tokens must be positive")
+    if args.batch_size < 1 or (args.limit is not None and args.limit < 1):
+        raise ValueError("batch-size and limit must be positive")
+    manifest, manifest_hash = validate_processed_manifest(args.data_dir)
     spec = MODELS[args.model_key]
     model_dir = args.model_dir or Path(spec.local_dir)
-    manifest, manifest_hash = validate_processed_manifest(args.data_dir)
     source = validate_model_source(model_dir, spec)
-    runner = HFModelRunner.from_pretrained(model_dir, batch_size=args.batch_size)
-    metrics = evaluate(
-        runner,
-        prompt_formatter=lambda problem: make_chat_prompt(runner.tokenizer, spec, problem),
-        prompt_name=f"chat-{spec.key}-boxed",
-        data_dir=args.data_dir,
-        split="dev",
-        output_dir=args.output_dir,
-        max_new_tokens=args.max_new_tokens,
-        limit=args.limit,
-    )
-    if runner.rank != 0:
-        return
+    if args.adapter_dir:
+        report = json.loads((args.adapter_dir.parent / "train_report.json").read_text())
+        if (
+            report["model_source"] != source
+            or report["data_manifest_sha256"] != manifest_hash
+        ):
+            raise ValueError("Adapter does not match the pinned model and data")
+    if not torch.cuda.is_available():
+        raise RuntimeError("Model evaluation requires CUDA")
+    tokenizer = load_tokenizer(model_dir)
+    tokenizer.truncation_side = "left"
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir,
+        local_files_only=True,
+        dtype=torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16,
+    ).to("cuda")
+    if args.adapter_dir:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(
+            model, args.adapter_dir, local_files_only=True
+        )
+    model.eval()
+    frame = load_cohort(args.data_dir, args.split)
+    if args.limit is not None:
+        frame = frame.head(args.limit)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    correct = 0
+    with (args.output_dir / "predictions.jsonl").open("w", encoding="utf-8") as output:
+        for start in range(0, len(frame), args.batch_size):
+            rows = list(
+                frame.iloc[start : start + args.batch_size].itertuples(index=False)
+            )
+            prompts = [make_chat_prompt(tokenizer, spec, row.problem) for row in rows]
+            encoded = tokenizer(
+                prompts,
+                add_special_tokens=False,
+                padding=True,
+                truncation=True,
+                max_length=MAX_PROMPT_LENGTH,
+                return_tensors="pt",
+            ).to("cuda")
+            with torch.inference_mode():
+                generated = model.generate(
+                    **encoded,
+                    do_sample=False,
+                    max_new_tokens=MAX_COMPLETION_LENGTH,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+            texts = tokenizer.batch_decode(
+                generated[:, encoded["input_ids"].shape[1] :], skip_special_tokens=True
+            )
+            for row, text in zip(rows, texts, strict=True):
+                passed = verify_boxed_numeric(
+                    text,
+                    numerator=int(row.gt_numerator),
+                    denominator=int(row.gt_denominator),
+                )
+                correct += int(passed)
+                output.write(
+                    json.dumps(
+                        {
+                            "problem": row.problem,
+                            "completion": text,
+                            "gt_numerator": int(row.gt_numerator),
+                            "gt_denominator": int(row.gt_denominator),
+                            "correct": passed,
+                        }
+                    )
+                    + "\n"
+                )
     report = {
         "model_key": spec.key,
-        "model_repo": spec.repo_id,
-        "model_revision": spec.revision,
         "model_source": source,
-        "dataset_split": "dev",
-        "cohort": COHORT_NAME,
+        "adapter_dir": str(args.adapter_dir) if args.adapter_dir else None,
         "data_manifest_sha256": manifest_hash,
-        "dev_cohort": manifest["cohort"]["dev"],
-        "system_prompt": spec.system_prompt,
-        "chat_template_sha256": hashlib.sha256(runner.tokenizer.chat_template.encode()).hexdigest(),
-        "generation": {
-            "do_sample": False,
-            "max_new_tokens": args.max_new_tokens,
-            "batch_size": args.batch_size,
-            "limit": args.limit,
-        },
-        "verifier_metrics": metrics,
+        "cohort": manifest["cohort"]["name"],
+        "split": args.split,
+        "limit": args.limit,
+        "total": len(frame),
+        "correct": correct,
+        "accuracy": correct / len(frame) if len(frame) else 0.0,
+        "do_sample": False,
+        "max_prompt_length": MAX_PROMPT_LENGTH,
+        "max_completion_length": MAX_COMPLETION_LENGTH,
     }
-    (args.output_dir / "baseline_report.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    (args.output_dir / "eval_report.json").write_text(
+        json.dumps(report, indent=2) + "\n"
     )
+    print(json.dumps(report, indent=2))
 
 
 def main() -> None:
@@ -105,11 +181,9 @@ def main() -> None:
                     args.raw_dir / "math_train.parquet",
                     args.raw_dir / "math_test.parquet",
                     args.output_dir,
-                    seed=42,
-                    dev_ratio=0.1,
                 )
         elif args.command == "model":
-            from post_train_math.resources import download_model
+            from post_train_math.models import download_model
 
             spec = MODELS[args.model_key]
             download_model(
@@ -117,7 +191,15 @@ def main() -> None:
                 revision=spec.revision,
                 output_dir=args.output_dir or Path(spec.local_dir),
             )
-        else:
+        elif args.command == "eval":
             run_eval(args)
-    except (OSError, ValueError, RuntimeError) as exc:
+        else:
+            from post_train_math.rloo import run_train
+
+            run_train(args)
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
         parser.exit(1, f"ERROR: {exc}\n")
+
+
+if __name__ == "__main__":
+    main()

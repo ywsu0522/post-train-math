@@ -59,38 +59,72 @@ def test_prepare_numeric_metadata_and_cohort_audit(tmp_path: Path, monkeypatch) 
     import post_train_math.data as data_module
 
     train = make_dataset()
-    train["solution"] = [r"\boxed{12.5\%}", r"\boxed{1/8}"] * 20
+    train["solution"] = [
+        r"\boxed{12.5\%}",
+        r"\boxed{1/8}",
+        r"\boxed{x}",
+        r"\boxed{1/8}",
+    ] * 10
     test = make_dataset()
     test["problem"] = "test " + test["problem"]
     test["solution"] = [r"\boxed{\frac{2}{16}}", r"\boxed{\frac{1}{0}}"] * 20
-    train_path, test_path = tmp_path / "raw_train.parquet", tmp_path / "raw_test.parquet"
+    train_path, test_path = (
+        tmp_path / "raw_train.parquet",
+        tmp_path / "raw_test.parquet",
+    )
     train.to_parquet(train_path, index=False)
     test.to_parquet(test_path, index=False)
     monkeypatch.setattr(data_module, "EXPECTED_RAW_TRAIN_ROWS", len(train))
     monkeypatch.setattr(data_module, "EXPECTED_RAW_TEST_ROWS", len(test))
-    monkeypatch.setattr(data_module, "MATH_TRAIN_SHA256", hashlib.sha256(train_path.read_bytes()).hexdigest())
-    monkeypatch.setattr(data_module, "MATH_TEST_SHA256", hashlib.sha256(test_path.read_bytes()).hexdigest())
+    monkeypatch.setattr(
+        data_module,
+        "MATH_TRAIN_SHA256",
+        hashlib.sha256(train_path.read_bytes()).hexdigest(),
+    )
+    monkeypatch.setattr(
+        data_module,
+        "MATH_TEST_SHA256",
+        hashlib.sha256(test_path.read_bytes()).hexdigest(),
+    )
+
+    def split_before_annotation(frame, **kwargs):
+        assert list(frame.columns) == ORIGINAL_COLUMNS
+        assert len(frame) == len(train)
+        return split_raw_train(frame, **kwargs)
+
+    monkeypatch.setattr(data_module, "split_raw_train", split_before_annotation)
     output = tmp_path / "processed"
-    data_module.prepare_datasets(train_path, test_path, output, seed=42, dev_ratio=0.2)
+    data_module.prepare_datasets(train_path, test_path, output)
 
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["source"]["sha256"]["train"] == data_module.MATH_TRAIN_SHA256
-    assert manifest["processed_sha256"]["dev"] == hashlib.sha256((output / "dev.parquet").read_bytes()).hexdigest()
+    assert (
+        manifest["processed_sha256"]["dev"]
+        == hashlib.sha256((output / "dev.parquet").read_bytes()).hexdigest()
+    )
     assert all(manifest["invariants"].values())
     cohort = manifest["cohort"]
     assert cohort["name"] == "boxed-numeric-v2"
-    assert cohort["source_train"]["eligible_rows"] == 40
+    assert cohort["source_train"]["eligible_rows"] == 30
     assert cohort["test"]["eligible_rows"] == 20
     assert cohort["combined"]["source_rows"] == 80
-    assert cohort["combined"]["eligible_rows"] == 60
-    assert cohort["combined"]["retention"] == 0.75
+    assert cohort["combined"]["eligible_rows"] == 50
+    assert cohort["combined"]["retention"] == 0.625
     assert cohort["combined"]["exclusion_counts"] == {
+        "non_numeric_boxed": 10,
         "zero_denominator": 20,
     }
-    assert cohort["train"]["eligible_rows"] + cohort["dev"]["eligible_rows"] == 40
+    assert cohort["train"]["eligible_rows"] + cohort["dev"]["eligible_rows"] == 30
+    expected_train, expected_dev = split_raw_train(train, seed=42, dev_ratio=0.1)
+    expected = {"train": expected_train, "dev": expected_dev, "test": test}
+    assert manifest["pipeline"] == data_module.PIPELINE
     for split in ("train", "dev", "test"):
         frame = pd.read_parquet(output / f"{split}.parquet")
         assert set(frame.columns) == set(ORIGINAL_COLUMNS + data_module.COHORT_COLUMNS)
+        pd.testing.assert_frame_equal(
+            frame[ORIGINAL_COLUMNS],
+            expected[split][ORIGINAL_COLUMNS].reset_index(drop=True),
+        )
         eligible = frame[frame["numeric_eligible"]]
         assert eligible["gt_numerator"].eq(1).all()
         assert eligible["gt_denominator"].eq(8).all()
@@ -303,3 +337,68 @@ def test_download_raw_datasets_rejects_corrupted_local_file(
             output_dir=output_dir,
             repo_id="org/math",
         )
+
+
+@pytest.mark.parametrize("seed,ratio", [(41, 0.1), (42, 0.2)])
+def test_prepare_cannot_change_frozen_split(tmp_path, seed, ratio):
+    from post_train_math.data import prepare_datasets
+
+    with pytest.raises(ValueError, match="frozen split"):
+        prepare_datasets(
+            tmp_path / "train",
+            tmp_path / "test",
+            tmp_path / "out",
+            seed=seed,
+            dev_ratio=ratio,
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_filtering_does_not_move_ineligible_problems_between_splits():
+    from post_train_math.data import annotate_numeric_cohort
+
+    raw = make_dataset()
+    raw.loc[raw.index % 3 == 0, "solution"] = r"\boxed{x}"
+    raw_train, raw_dev = split_raw_train(raw, seed=42, dev_ratio=0.1)
+    train = annotate_numeric_cohort(raw_train)
+    dev = annotate_numeric_cohort(raw_dev)
+    assert len(train) == 36 and len(dev) == 4
+    assert train["problem"].tolist() == raw_train["problem"].tolist()
+    assert dev["problem"].tolist() == raw_dev["problem"].tolist()
+    assert set(train.loc[train.numeric_eligible, "problem"]).isdisjoint(
+        set(dev.loc[dev.numeric_eligible, "problem"])
+    )
+
+
+def test_committed_manifest_freezes_membership_and_gold_rule():
+    from post_train_math import data
+
+    manifest = json.loads(
+        (Path(__file__).resolve().parents[1] / "cohort/manifest.json").read_text()
+    )
+    assert manifest["source"] == {
+        "repo_id": data.MATH_DATASET_REPO,
+        "revision": data.MATH_DATASET_REVISION,
+        "sha256": {"train": data.MATH_TRAIN_SHA256, "test": data.MATH_TEST_SHA256},
+    }
+    assert manifest["processed_sha256"] == data.FROZEN_PROCESSED_SHA256
+    assert manifest["pipeline"] == data.PIPELINE
+    assert manifest["split"] == {
+        "seed": 42,
+        "dev_ratio": 0.1,
+        "stratify": ["type", "level"],
+    }
+    assert manifest["processed"] == {
+        "train_rows": 6750,
+        "dev_rows": 750,
+        "test_rows": 5000,
+    }
+    assert manifest["cohort"]["definition"] == data.COHORT_DEFINITION
+    assert {
+        split: manifest["cohort"][split]["eligible_rows"]
+        for split in ("train", "dev", "test")
+    } == {
+        "train": 5029,
+        "dev": 560,
+        "test": 3686,
+    }

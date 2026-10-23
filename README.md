@@ -1,30 +1,32 @@
 # post-train-math
 
-This repository records two completed pieces of work:
+Pinned Hendrycks MATH data, the frozen `boxed-numeric-v2` cohort, and RLOO
+training with TRL + PEFT for two pinned checkpoints. Python 3.12 and uv are
+required. Data preparation and tests run on CPU; evaluation and training require CUDA.
 
-1. A pinned Hendrycks MATH source, deterministic train/dev split, and the
-   `boxed-numeric-v2` research cohort.
-2. The original dev baseline measurements for OLMo2-1B-SFT and Granite-3.3-2B-IFT.
+## Frozen data contract
 
-Training is not part of the current implementation. The next experiment is RLOO
-with `max_prompt_length = max_completion_length = 2048`, B prompts per update,
-and R rollouts per prompt. Those runs have not been completed.
+The order is fixed in code and `cohort/manifest.json`:
 
-## Fixed dataset and cohort
+1. Verify the original source files and their SHA256 hashes.
+2. Split **all 7,500 original train problems** into **6,750 train / 750 dev**
+   with seed 42, dev ratio 0.1, and type/level stratification.
+3. Keep the **original 5,000 test problems unchanged**, including their order.
+4. Apply the **same** `boxed-numeric-v2` rule independently within train, dev,
+   and test. Never filter before splitting or re-split the eligible subset.
 
-Source: `DigitalLearningGmbH/MATH-lighteval` at
-`f06834690385b29df31ccc717250746a3ba0322b` (the consolidated Hendrycks MATH data).
-The original 7,500 training problems are split into 6,750 train and 750 dev
-problems using seed 42, dev ratio 0.1, and type/level stratification. The original
-5,000 test problems remain separate. Cohort filtering preserves this split and
-includes all levels and subjects.
+The source is `DigitalLearningGmbH/MATH-lighteval` at
+`f06834690385b29df31ccc717250746a3ba0322b`.
 
-Pinned source file SHA256:
-
-| File | SHA256 |
+| Source file | SHA256 |
 | --- | --- |
 | `data/train-00000-of-00001.parquet` | `eca6e667f4305dd5e5ba09b4fd55e7f3174a0fbe361cdfd4c44758b593a76933` |
 | `data/test-00000-of-00001.parquet` | `7dca8d6e41af88ecf82f2b5f36eb5530e083aaaa86ee325f62bd5c31535178c6` |
+
+A gold solution is eligible only if it contains **exactly one literal `\boxed`
+marker**, with a complete, balanced, nonempty braced argument. Additional
+markers, including empty, nested, or malformed ones, exclude the whole solution.
+After stripping outer whitespace, the entire boxed content must match:
 
 ```text
 digits         := [0-9]+
@@ -34,78 +36,102 @@ fraction_slash := ["-"] digits "/" digits
 answer         := number | fraction_latex | fraction_slash
 ```
 
-A gold solution must contain exactly one literal `\boxed` marker, with balanced,
-nonempty braces. After stripping outer whitespace, its content must fully match
-this grammar. Internal whitespace, plus signs, signed denominators, and zero
-denominators are rejected. Percentages are divided by 100; all accepted forms
-are compared as exact rational values using `Decimal` and `Fraction`.
+Internal whitespace, plus signs, signed denominators, zero denominators,
+scientific notation, expressions, units, and symbolic answers are invalid.
+Decimals are parsed exactly; percentages divide by 100. Accepted values are
+canonicalized as `Fraction`.
 
-Prediction scoring examines the final boxed marker. A malformed final marker
-does not fall back to an earlier box. No symbolic verifier or constrained decoding
-is used. The grammar and extraction rules are implemented in
-[`answers.py`](src/post_train_math/answers.py).
+| Split | Before filtering | Eligible |
+| --- | ---: | ---: |
+| train | 6,750 | 5,029 |
+| dev | 750 | 560 |
+| test | 5,000 | 3,686 |
 
-Preparation verifies source hashes and records the source identity, processed
-file hashes, split settings, cohort counts, and exclusions in `manifest.json`.
-The verified current snapshot is committed as [`cohort/manifest.json`](cohort/manifest.json):
-5,029 train, 560 dev, and 3,686 test problems are eligible.
-Evaluation verifies that manifest and the processed files before loading a model.
+Processed Parquet files retain every original row plus eligibility and exact
+gold metadata. Consumers select `numeric_eligible` within the requested split.
+Preparation records provenance, counts, exclusions, and file hashes. Evaluation
+and training reject files that differ from the frozen hashes, even if their
+local manifest was edited to match. This preserves the frozen problem groups.
 
-## Completed baseline measurements
+Prediction reward uses only the final boxed marker: 1 for exact rational equality,
+0 otherwise. A malformed final box cannot fall back to an earlier box.
 
-| Candidate | Correct / dev cohort | Accuracy | Completion budget |
-| --- | --- | --- | --- |
-| OLMo2-1B-SFT | 101 / 544 | 18.57% | 1024 |
-| Granite-3.3-2B-IFT | 344 / 544 | 63.24% | 1024 |
-
-The original ZIPs, including predictions, metrics, and reports, are stored in
-[`baselines/`](baselines/README.md), with checksums in
-[`baselines/manifest.json`](baselines/manifest.json).
-
-These measurements used **exact-rational-v1**, greedy decoding, and each model's
-native chat template with its recorded system prompt. They are historical
-measurements, not measurements on the current v2 cohort or at a 2048-token
-budget. They have not been relabeled or replaced. New v2 evaluations use separate
-output directories. The candidate revisions and original prompt text remain
-pinned in [`baselines.py`](src/post_train_math/baselines.py).
-
-## Usage
-
-The repository, package distribution, and CLI are named `post-train-math`.
-The Python package is `post_train_math` (Python identifiers use underscores):
-`python -m post_train_math` is equivalent to the CLI.
-
-Python 3.12 and uv are required. Model evaluation requires CUDA. Data preparation
-and unit tests can run on CPU.
+## Four workflows
 
 ```bash
 uv sync --locked --group dev
+
+# 1. Download, split, and annotate the data.
 uv run --locked post-train-math data download
 uv run --locked post-train-math data prepare
+
+# 2. Download the pinned model checkpoints.
 uv run --locked post-train-math model download --model-key olmo2
 uv run --locked post-train-math model download --model-key granite
-uv run --locked post-train-math eval --model-key olmo2 --output-dir runs/olmo2-v2-dev
-uv run --locked post-train-math eval --model-key granite --output-dir runs/granite-v2-dev
+
+# 3. Evaluate the dev cohort with greedy decoding.
+uv run --locked post-train-math eval --model-key olmo2 --output-dir runs/olmo2-dev
+uv run --locked post-train-math eval --model-key granite --output-dir runs/granite-dev
+
+# 4. Train a LoRA adapter with RLOO.
+uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --prompts-per-update 8 --rollouts 4 --max-steps 100
+
+# Evaluate the trained adapter.
+uv run --locked post-train-math eval --model-key olmo2 --adapter-dir runs/olmo2-rloo/adapter --output-dir runs/olmo2-rloo-dev
 ```
 
-The evaluation commands above run the current v2 cohort with the retained
-1024-token default. They do not recreate the old 544-question cohort. Use
-`--max-new-tokens` explicitly for a new generation budget. `--limit` is available
-for a smoke evaluation and is recorded in the output.
+Use `--split test` for test evaluation, and `--limit N` for a recorded smoke
+evaluation. Model/data directories may be overridden with `--model-dir` and
+`--data-dir`. Run output directories must be empty. The module entry point is
+`python -m post_train_math.cli`.
 
-For Linux GPU environments, `bash scripts/launch_gpu.sh 2 eval --model-key granite
---output-dir runs/granite-v2-dev-2gpu` uses two processes and merges the predictions.
-Each process has its own model copy. Output directories must be empty.
+| Key | Checkpoint | Commit |
+| --- | --- | --- |
+| `olmo2` | `allenai/OLMo-2-0425-1B-SFT` | `0d85a3d037876ce6ac7d4311d994400fc66ac27f` |
+| `granite` | `ibm-granite/granite-3.3-2b-instruct` | `707f574c62054322f6b5b04b6d075f0a8f05e0f0` |
 
-If existing raw files fail source verification, use a new location:
+Both models use their native chat templates and explicit fixed system prompts.
+Training reads only the train cohort. Dev and test are used by the evaluation
+workflow. Training saves `adapter/` and `train_report.json`; evaluation saves
+`predictions.jsonl` and `eval_report.json`.
 
-```bash
-uv run --locked post-train-math data download --output-dir data/pinned-raw
-uv run --locked post-train-math data prepare --raw-dir data/pinned-raw --output-dir data/pinned-processed
+RLOO uses TRL 1.12.0 and PEFT 0.20.0. `B` is the global number of prompts per
+optimizer update and `R >= 2` is the number of rollouts per prompt. The global
+sequence batch is `B * R`; gradient accumulation is
+`B * R / (micro_batch * world_size)` and must be an integer. Each rollout batch
+has one optimizer update (`num_iterations=1`). LoRA uses rank 16, alpha 32,
+zero dropout and all linear layers. The pinned base with adapters disabled is
+the fixed reference policy, with KL coefficient 0.05. Advantages are not
+normalized. Sampling uses temperature 1.0 without top-k/top-p restriction.
+See the [TRL RLOO reference](https://huggingface.co/docs/trl/rloo_trainer).
+
+Prompt and completion budgets are both 2,048 tokens for training and evaluation.
+Overlong prompts are truncated from the left after the native chat template;
+this does not remove or move problems. Training uses seed 42, gradient
+checkpointing, and BF16 when available, otherwise FP16. For multiple GPUs, use
+`accelerate launch --num_processes 2 -m post_train_math.cli train ...`; `B` remains
+global. Evaluation runs on one GPU.
+
+## Repository
+
+```text
+post-train-math/
+├── cohort/manifest.json
+├── src/post_train_math/
+│   ├── answers.py
+│   ├── data.py
+│   ├── models.py
+│   ├── rloo.py
+│   └── cli.py
+├── tests/
+├── pyproject.toml
+├── uv.lock
+└── README.md
 ```
 
-Pass `--data-dir data/pinned-processed` to evaluation when using that location.
-Downloaded data, model weights, and new run outputs are gitignored.
+`post_train_math` is a namespace package. Downloads, model weights, run outputs,
+virtual environments, and caches are created locally by the commands above.
+They are not part of the source tree.
 
 ## Checks
 
@@ -113,4 +139,11 @@ Downloaded data, model weights, and new run outputs are gitignored.
 uv lock --check
 uv run --locked ruff check src tests
 uv run --locked pytest -q
+uv build
 ```
+
+Tests cover the grammar, strict gold-box requirement, reward, split-before-filter
+membership, source/file integrity, model pins, all four CLI workflows, and a
+small real TRL/PEFT CPU training step with adapter export. They do not run the
+full GPU experiment or claim any model accuracy. Historical baseline artifacts
+and local experiments have been removed.

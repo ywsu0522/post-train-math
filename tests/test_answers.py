@@ -121,7 +121,10 @@ def test_gold_cohort_requires_exactly_one_boxed_marker() -> None:
 
     # Count literal markers, including nested, escaped and malformed occurrences.
     for solution in (r"\boxed{\boxed{1}}", r"\\boxed{1} \boxed", r"\boxed{1} \boxed 2"):
-        assert classify_boxed_numeric_solution(solution).exclusion_reason == "multiple_boxed"
+        assert (
+            classify_boxed_numeric_solution(solution).exclusion_reason
+            == "multiple_boxed"
+        )
 
     decimal = classify_boxed_numeric_solution("Work. \\boxed{ \t50\\%\n }")
     assert decimal.eligible
@@ -131,8 +134,13 @@ def test_gold_cohort_requires_exactly_one_boxed_marker() -> None:
 
 def test_gold_cohort_exclusion_reasons() -> None:
     assert classify_boxed_numeric_solution("answer 2").exclusion_reason == "no_boxed"
-    assert classify_boxed_numeric_solution(r"\boxed{}").exclusion_reason == "empty_boxed"
-    assert classify_boxed_numeric_solution(r"\boxed 2").exclusion_reason == "malformed_boxed"
+    assert (
+        classify_boxed_numeric_solution(r"\boxed{}").exclusion_reason == "empty_boxed"
+    )
+    assert (
+        classify_boxed_numeric_solution(r"\boxed 2").exclusion_reason
+        == "malformed_boxed"
+    )
     assert (
         classify_boxed_numeric_solution(r"\boxed{\sqrt{2}}").exclusion_reason
         == "non_numeric_boxed"
