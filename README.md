@@ -1,4 +1,4 @@
-# MATH cohort and candidate baselines
+# post-train-math
 
 This repository records two completed pieces of work:
 
@@ -43,7 +43,7 @@ are compared as exact rational values using `Decimal` and `Fraction`.
 Prediction scoring examines the final boxed marker. A malformed final marker
 does not fall back to an earlier box. No symbolic verifier or constrained decoding
 is used. The grammar and extraction rules are implemented in
-[`answers.py`](src/posttrain_math/answers.py).
+[`answers.py`](src/post_train_math/answers.py).
 
 Preparation verifies source hashes and records the source identity, processed
 file hashes, split settings, cohort counts, and exclusions in `manifest.json`.
@@ -67,21 +67,25 @@ native chat template with its recorded system prompt. They are historical
 measurements, not measurements on the current v2 cohort or at a 2048-token
 budget. They have not been relabeled or replaced. New v2 evaluations use separate
 output directories. The candidate revisions and original prompt text remain
-pinned in [`baselines.py`](src/posttrain_math/baselines.py).
+pinned in [`baselines.py`](src/post_train_math/baselines.py).
 
 ## Usage
+
+The repository, package distribution, and CLI are named `post-train-math`.
+The Python package is `post_train_math` (Python identifiers use underscores):
+`python -m post_train_math` is equivalent to the CLI.
 
 Python 3.12 and uv are required. Model evaluation requires CUDA. Data preparation
 and unit tests can run on CPU.
 
 ```bash
 uv sync --locked --group dev
-uv run --locked posttrain-math data download
-uv run --locked posttrain-math data prepare
-uv run --locked posttrain-math model download --model-key olmo2
-uv run --locked posttrain-math model download --model-key granite
-uv run --locked posttrain-math eval --model-key olmo2 --output-dir runs/olmo2-v2-dev
-uv run --locked posttrain-math eval --model-key granite --output-dir runs/granite-v2-dev
+uv run --locked post-train-math data download
+uv run --locked post-train-math data prepare
+uv run --locked post-train-math model download --model-key olmo2
+uv run --locked post-train-math model download --model-key granite
+uv run --locked post-train-math eval --model-key olmo2 --output-dir runs/olmo2-v2-dev
+uv run --locked post-train-math eval --model-key granite --output-dir runs/granite-v2-dev
 ```
 
 The evaluation commands above run the current v2 cohort with the retained
@@ -96,8 +100,8 @@ Each process has its own model copy. Output directories must be empty.
 If existing raw files fail source verification, use a new location:
 
 ```bash
-uv run --locked posttrain-math data download --output-dir data/pinned-raw
-uv run --locked posttrain-math data prepare --raw-dir data/pinned-raw --output-dir data/pinned-processed
+uv run --locked post-train-math data download --output-dir data/pinned-raw
+uv run --locked post-train-math data prepare --raw-dir data/pinned-raw --output-dir data/pinned-processed
 ```
 
 Pass `--data-dir data/pinned-processed` to evaluation when using that location.

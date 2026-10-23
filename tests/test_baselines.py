@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from posttrain_math.baselines import (
+from post_train_math.baselines import (
     MODELS,
     make_chat_prompt,
     validate_model_source,
     validate_processed_manifest,
 )
-from posttrain_math.cli import build_parser
+from post_train_math.cli import build_parser
 
 
 def test_preserved_baselines_are_original_measurements():
@@ -59,7 +59,7 @@ def test_model_revision_mismatch_is_rejected(tmp_path):
 
 
 def test_current_cohort_requires_verified_source_and_unchanged_files(tmp_path):
-    from posttrain_math import data
+    from post_train_math import data
 
     with pytest.raises(ValueError, match="Missing processed"):
         validate_processed_manifest(tmp_path)
@@ -83,7 +83,7 @@ def test_current_cohort_requires_verified_source_and_unchanged_files(tmp_path):
 
 
 def test_prepare_rejects_unverified_raw_files_before_writing(tmp_path):
-    from posttrain_math.data import prepare_datasets
+    from post_train_math.data import prepare_datasets
 
     train, test, output = tmp_path / "train", tmp_path / "test", tmp_path / "processed"
     train.write_bytes(b"unverified train")
@@ -105,7 +105,7 @@ def test_cli_exposes_only_data_model_and_eval():
 def test_generation_does_not_add_a_second_bos():
     import torch
 
-    from posttrain_math.modeling import HFModelRunner
+    from post_train_math.modeling import HFModelRunner
 
     class Tokenizer:
         pad_token_id = 0

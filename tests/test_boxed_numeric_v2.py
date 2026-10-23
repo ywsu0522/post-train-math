@@ -5,13 +5,13 @@ from fractions import Fraction
 
 import pytest
 
-from posttrain_math.answers import (
+from post_train_math.answers import (
     classify_boxed_numeric_solution,
     extract_final_boxed_numeric,
     parse_boxed_numeric,
     verify_boxed_numeric,
 )
-from posttrain_math.data import COHORT_NAME, assert_current_cohort
+from post_train_math.data import COHORT_NAME, assert_current_cohort
 
 
 @pytest.mark.parametrize(

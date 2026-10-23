@@ -85,7 +85,7 @@ def validate_model_source(model_dir: Path, spec: IFTModelSpec) -> dict:
 
 
 def validate_processed_manifest(data_dir: Path) -> tuple[dict, str]:
-    from posttrain_math.data import (
+    from post_train_math.data import (
         MATH_DATASET_REPO,
         MATH_DATASET_REVISION,
         MATH_TEST_SHA256,

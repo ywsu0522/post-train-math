@@ -10,15 +10,15 @@ import numpy as np
 import pandas as pd
 from tabulate import tabulate
 
-from posttrain_math.answers import extract_final_boxed, parse_boxed_numeric
-from posttrain_math.data import assert_current_cohort
-from posttrain_math.distributed import (
+from post_train_math.answers import extract_final_boxed, parse_boxed_numeric
+from post_train_math.data import assert_current_cohort
+from post_train_math.distributed import (
     barrier,
     destroy_process_group_if_owned,
     get_distributed_context,
     init_process_group_if_needed,
 )
-from posttrain_math.modeling import TextGenerator
+from post_train_math.modeling import TextGenerator
 
 PromptFormatter = Callable[[str], str]
 
@@ -59,7 +59,7 @@ def load_eval_split(data_dir: Path, split: str) -> pd.DataFrame:
     if missing:
         raise ValueError(
             "Evaluation data missing columns: "
-            f"{sorted(missing)}. Re-run `posttrain-math data prepare`."
+            f"{sorted(missing)}. Re-run `post-train-math data prepare`."
         )
     return df
 

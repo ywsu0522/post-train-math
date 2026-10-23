@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  echo "Usage: bash scripts/launch_gpu.sh <1|2|auto> <posttrain-math args...>" >&2
+  echo "Usage: bash scripts/launch_gpu.sh <1|2|auto> <post-train-math args...>" >&2
   exit 2
 fi
 
@@ -36,11 +36,11 @@ if [[ "$requested" -gt "$visible" ]]; then
 fi
 
 if [[ "$requested" -eq 1 ]]; then
-  exec uv run --locked --no-sync python -m posttrain_math "$@"
+  exec uv run --locked --no-sync python -m post_train_math "$@"
 fi
 
 exec uv run --locked --no-sync torchrun \
   --standalone \
   --nproc_per_node="$requested" \
-  --module posttrain_math \
+  --module post_train_math \
   "$@"

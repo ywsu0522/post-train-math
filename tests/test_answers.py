@@ -3,7 +3,7 @@ from fractions import Fraction
 
 import pytest
 
-from posttrain_math.answers import (
+from post_train_math.answers import (
     classify_boxed_format,
     classify_boxed_numeric_solution,
     extract_final_boxed,

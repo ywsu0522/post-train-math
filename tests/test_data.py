@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from posttrain_math.data import (
+from post_train_math.data import (
     ORIGINAL_COLUMNS,
     annotate_numeric_cohort,
     split_raw_train,
@@ -56,7 +56,7 @@ def test_annotate_numeric_cohort(answer: str) -> None:
 
 
 def test_prepare_numeric_metadata_and_cohort_audit(tmp_path: Path, monkeypatch) -> None:
-    import posttrain_math.data as data_module
+    import post_train_math.data as data_module
 
     train = make_dataset()
     train["solution"] = [r"\boxed{12.5\%}", r"\boxed{1/8}"] * 20
@@ -110,7 +110,7 @@ def test_download_raw_datasets_uses_two_consolidated_files(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    import posttrain_math.data as data_module
+    import post_train_math.data as data_module
 
     class FakeInfo:
         sha = "dataset-sha"
@@ -163,7 +163,7 @@ def test_download_raw_datasets_reuses_verified_local_copy(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    import posttrain_math.data as data_module
+    import post_train_math.data as data_module
 
     output_dir = tmp_path / "data"
     output_dir.mkdir(parents=True)
@@ -213,7 +213,7 @@ def test_download_raw_datasets_reuses_verified_local_copy(
 def test_download_raw_datasets_rejects_stale_local_revision(
     tmp_path: Path,
 ) -> None:
-    import posttrain_math.data as data_module
+    import post_train_math.data as data_module
 
     output_dir = tmp_path / "data"
     output_dir.mkdir(parents=True)
@@ -259,7 +259,7 @@ def test_download_raw_datasets_rejects_stale_local_revision(
 def test_download_raw_datasets_rejects_corrupted_local_file(
     tmp_path: Path,
 ) -> None:
-    import posttrain_math.data as data_module
+    import post_train_math.data as data_module
 
     output_dir = tmp_path / "data"
     output_dir.mkdir(parents=True)

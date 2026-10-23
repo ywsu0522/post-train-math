@@ -5,7 +5,7 @@ from typing import Any
 
 import pandas as pd
 
-from posttrain_math.evaluation import evaluate
+from post_train_math.evaluation import evaluate
 
 
 class FakeGenerator:

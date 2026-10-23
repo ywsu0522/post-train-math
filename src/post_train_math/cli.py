@@ -5,11 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 
-from posttrain_math.baselines import MODELS, make_chat_prompt
+from post_train_math.baselines import MODELS, make_chat_prompt
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="posttrain-math")
+    parser = argparse.ArgumentParser(prog="post-train-math")
     commands = parser.add_subparsers(dest="command", required=True)
     data = commands.add_parser("data").add_subparsers(dest="data_command", required=True)
     download = data.add_parser("download", help="Download the pinned MATH source.")
@@ -36,13 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_eval(args: argparse.Namespace) -> None:
-    from posttrain_math.baselines import (
+    from post_train_math.baselines import (
         validate_model_source,
         validate_processed_manifest,
     )
-    from posttrain_math.data import COHORT_NAME
-    from posttrain_math.evaluation import evaluate
-    from posttrain_math.modeling import HFModelRunner
+    from post_train_math.data import COHORT_NAME
+    from post_train_math.evaluation import evaluate
+    from post_train_math.modeling import HFModelRunner
 
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
@@ -96,7 +96,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "data":
-            from posttrain_math.data import download_raw_datasets, prepare_datasets
+            from post_train_math.data import download_raw_datasets, prepare_datasets
 
             if args.data_command == "download":
                 download_raw_datasets(output_dir=args.output_dir, force=args.force)
@@ -109,7 +109,7 @@ def main() -> None:
                     dev_ratio=0.1,
                 )
         elif args.command == "model":
-            from posttrain_math.resources import download_model
+            from post_train_math.resources import download_model
 
             spec = MODELS[args.model_key]
             download_model(

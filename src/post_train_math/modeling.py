@@ -11,7 +11,7 @@ from transformers import (
     AutoTokenizer,
 )
 
-from posttrain_math.distributed import get_distributed_context
+from post_train_math.distributed import get_distributed_context
 
 
 class TextGenerator(Protocol):

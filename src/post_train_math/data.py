@@ -11,7 +11,7 @@ import pandas as pd
 from huggingface_hub import HfApi, hf_hub_download
 from sklearn.model_selection import train_test_split
 
-from posttrain_math.answers import NumericGold, classify_boxed_numeric_solution
+from post_train_math.answers import NumericGold, classify_boxed_numeric_solution
 
 ORIGINAL_COLUMNS = ["problem", "solution", "type", "level"]
 COHORT_COLUMNS = [
@@ -268,7 +268,7 @@ def assert_current_cohort(data_dir: Path) -> None:
     if name != COHORT_NAME:
         raise ValueError(
             f"Prepared cohort is {name!r}; this code requires {COHORT_NAME!r}. "
-            "Re-run `posttrain-math data prepare` before evaluation."
+            "Re-run `post-train-math data prepare` before evaluation."
         )
 
 
@@ -453,7 +453,7 @@ def prepare_datasets(
     if source_hashes != {"train": MATH_TRAIN_SHA256, "test": MATH_TEST_SHA256}:
         raise ValueError(
             "Raw MATH SHA256 does not match the pinned source. "
-            "Download verified files with `posttrain-math data download --output-dir <new-dir>` "
+            "Download verified files with `post-train-math data download --output-dir <new-dir>` "
             "then prepare with `--raw-dir <new-dir>`."
         )
     raw_train = load_dataset(train_path)

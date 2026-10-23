@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from posttrain_math import resources
+from post_train_math import resources
 
 
 def test_default_model_is_olmo() -> None:

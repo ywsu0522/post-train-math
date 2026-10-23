@@ -1,5 +1,5 @@
 [project]
-name = "posttrain-math"
+name = "post-train-math"
 version = "0.1.0"
 description = "Pinned MATH cohort and candidate-model baseline evaluation."
 readme = "README.md"
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-posttrain-math = "posttrain_math.cli:main"
+post-train-math = "post_train_math.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.6,<0.13"]
