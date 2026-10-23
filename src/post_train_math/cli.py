@@ -46,13 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
                 "--rollouts", type=int, default=4, help="R per prompt, >= 2"
             )
             command.add_argument(
-                "--micro-batch", type=int, default=1, help="Sequences/device"
+                "--per-device-train-batch-size",
+                type=int,
+                default=1,
+                help="Sequences/device",
             )
             command.add_argument(
                 "--gradient-accumulation-steps",
                 type=int,
                 default=32,
-                help="Optimizer accumulation steps; B*R must equal micro-batch*world-size*steps",
+                help="Optimizer accumulation steps; B*R must equal per-device-train-batch-size*world-size*steps",
             )
             command.add_argument(
                 "--prepare-only",
@@ -61,6 +64,11 @@ def build_parser() -> argparse.ArgumentParser:
             )
             command.add_argument("--max-steps", type=int, default=100)
             command.add_argument("--learning-rate", type=float, default=1e-5)
+            command.add_argument(
+                "--resume-from-checkpoint",
+                type=Path,
+                help="Resume a complete checkpoint-N, including optimizer and RNG state",
+            )
     return parser
 
 

@@ -111,11 +111,29 @@ def test_cli_exposes_four_workflows():
             "runs/test",
             "--gradient-accumulation-steps",
             "16",
+            "--per-device-train-batch-size",
+            "2",
+            "--resume-from-checkpoint",
+            "runs/test/checkpoint-50",
             "--prepare-only",
         ]
     )
     assert train.gradient_accumulation_steps == 16
+    assert train.per_device_train_batch_size == 2
+    assert train.resume_from_checkpoint == Path("runs/test/checkpoint-50")
     assert train.prepare_only
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "train",
+                "--model-key",
+                "olmo2",
+                "--output-dir",
+                "runs/test",
+                "--micro-batch",
+                "1",
+            ]
+        )
     for command in ("rloo", "grpo", "doctor"):
         with pytest.raises(SystemExit):
             parser.parse_args([command])

@@ -74,7 +74,7 @@ uv run --locked post-train-math eval --model-key olmo2 --output-dir runs/olmo2-d
 uv run --locked post-train-math eval --model-key granite --output-dir runs/granite-dev
 
 # 4. Train a LoRA adapter with RLOO.
-uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --prompts-per-update 8 --rollouts 4 --gradient-accumulation-steps 32 --max-steps 100
+uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --prompts-per-update 8 --rollouts 4 --per-device-train-batch-size 1 --gradient-accumulation-steps 32 --max-steps 100
 
 # Evaluate the trained adapter.
 uv run --locked post-train-math eval --model-key olmo2 --adapter-dir runs/olmo2-rloo/adapter --output-dir runs/olmo2-rloo-dev
@@ -82,7 +82,8 @@ uv run --locked post-train-math eval --model-key olmo2 --adapter-dir runs/olmo2-
 
 Use `--split test` for test evaluation, and `--limit N` for a recorded smoke
 evaluation. Model/data directories may be overridden with `--model-dir` and
-`--data-dir`. Run output directories must be empty. The module entry point is
+`--data-dir`. New run output directories must be empty; explicit checkpoint
+resume may reuse the original run directory. The module entry point is
 `python -m post_train_math.cli`.
 
 | Key | Checkpoint | Commit |
@@ -99,13 +100,47 @@ RLOO uses TRL 1.12.0 and PEFT 0.20.0. `B` is the global number of prompts per
 optimizer update and `R >= 2` is the number of rollouts per prompt. The global
 sequence batch is `B * R`. Set gradient accumulation with
 `--gradient-accumulation-steps` (default 32). The CLI does not derive or override
-it: `B * R = micro_batch * world_size * gradient_accumulation_steps` is required.
+it: `B * R = per_device_train_batch_size * world_size * gradient_accumulation_steps` is required.
+Set sequences per device with `--per-device-train-batch-size` (default 1).
 Inconsistent settings fail before loading model weights. Each rollout batch
 has one optimizer update (`num_iterations=1`). LoRA uses rank 16, alpha 32,
 zero dropout and all linear layers. The pinned base with adapters disabled is
 the fixed reference policy, with KL coefficient 0.05. Advantages are not
 normalized. Sampling uses temperature 1.0 without top-k/top-p restriction.
 See the [TRL RLOO reference](https://huggingface.co/docs/trl/rloo_trainer).
+
+The optimizer is AdamW (`adamw_torch`). Learning rate is **constant**, with zero
+warmup. Complete `checkpoint-N/` directories are saved every **50 optimizer
+steps**, and Trainer also saves at the end of training. Each checkpoint contains
+LoRA weights, AdamW first/second moments and step counters (`optimizer.pt`), the
+constant scheduler state, trainer state/log history, RNG state for every rank,
+and the AMP scaler when FP16 is used. Checkpoints also contain
+`run_definition.json`, binding them to the pinned model, dataset, training subset,
+batch/optimizer settings, precision, world size, and library versions.
+The repeat sampler uses `seed + epoch`, so checkpoint resume reconstructs the
+same shuffled prompt order, including after an epoch boundary. Checkpoints are
+saved between complete rollout/update batches.
+
+Resume a full checkpoint, using the same training settings:
+
+```bash
+uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --resume-from-checkpoint runs/olmo2-rloo/checkpoint-100 --per-device-train-batch-size 1 --gradient-accumulation-steps 32 --max-steps 200
+```
+
+`--max-steps 200` is the **total target**, so this continues from step 100 to
+step 200. It may be extended because the constant schedule does not depend on
+the original horizon. Incompatible settings and incomplete checkpoints are
+rejected before writing run artifacts or loading model weights. `adapter/` is
+an inference export; it does not contain AdamW moments and cannot be used for
+training resume. An empty new output directory can also resume a checkpoint
+from another run; a nonempty directory can only resume its own checkpoint.
+`--prepare-only` cannot be combined with resume.
+
+`train_report.json` records `log_history` directly from
+`trainer.state.log_history`, `train_metrics` from the final `trainer.train()`
+result, the final global step, and the resume checkpoint path. Resumed history
+retains the earlier steps loaded from the checkpoint. The final trainer state
+is also saved as `trainer_state.json`.
 
 Training starts from exactly the frozen **5,029** `boxed-numeric` train problems.
 For each model, it tokenizes every full conversation with that model's actual
@@ -154,7 +189,7 @@ Both models currently retain all 5,029 problems. Their overlong JSONL files are
 empty; the filter and 2048/2049-token boundary remain enforced.
 
 Training uses seed 42, gradient checkpointing, and BF16 when available, otherwise
-FP16. For two GPUs with B=8, R=4, micro-batch=1, specify
+FP16. For two GPUs with B=8, R=4, per-device-train-batch-size=1, specify
 `--gradient-accumulation-steps 16` with
 `accelerate launch --num_processes 2 -m post_train_math.cli train ...`.
 Evaluation runs on one GPU.

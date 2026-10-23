@@ -107,7 +107,7 @@ def test_real_trl_peft_cpu_step_and_adapter_save(tmp_path, monkeypatch):
         tmp_path,
         prompts=2,
         rollouts=2,
-        micro_batch=1,
+        per_device_train_batch_size=1,
         world_size=1,
         gradient_accumulation_steps=4,
         max_steps=1,
@@ -120,6 +120,11 @@ def test_real_trl_peft_cpu_step_and_adapter_save(tmp_path, monkeypatch):
     assert config.max_completion_length == 2048
     assert config.chat_template_kwargs == {"truncation": False}
     assert config.num_iterations == 1 and not config.sync_ref_model
+    assert config.lr_scheduler_type == "constant"
+    assert config.optim == "adamw_torch"
+    assert config.warmup_steps == 0
+    assert config.save_strategy == "steps" and config.save_steps == 50
+    assert not config.save_only_model
     config.max_completion_length = 4
     config.disable_tqdm = True
     from dataclasses import replace
