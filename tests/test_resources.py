@@ -5,9 +5,9 @@ from posttrain_math import resources
 
 
 def test_default_model_is_olmo() -> None:
-    assert resources.DEFAULT_MODEL_REPO == "allenai/OLMo-2-0425-1B"
-    assert resources.DEFAULT_MODEL_REVISION == "13cece9360d59bb9db636273ea8d000b67fcc27b"
-    assert resources.DEFAULT_MODEL_DIR == Path("models/olmo-2-0425-1b")
+    assert resources.DEFAULT_MODEL_REPO == "allenai/OLMo-2-0425-1B-SFT"
+    assert resources.DEFAULT_MODEL_REVISION == "0d85a3d037876ce6ac7d4311d994400fc66ac27f"
+    assert resources.DEFAULT_MODEL_DIR == Path("models/ift/olmo-2-0425-1b-sft")
 
 
 def test_download_model_records_resolved_commit(tmp_path, monkeypatch) -> None:

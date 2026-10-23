@@ -68,10 +68,14 @@ def test_prepare_numeric_metadata_and_cohort_audit(tmp_path: Path, monkeypatch) 
     test.to_parquet(test_path, index=False)
     monkeypatch.setattr(data_module, "EXPECTED_RAW_TRAIN_ROWS", len(train))
     monkeypatch.setattr(data_module, "EXPECTED_RAW_TEST_ROWS", len(test))
+    monkeypatch.setattr(data_module, "MATH_TRAIN_SHA256", hashlib.sha256(train_path.read_bytes()).hexdigest())
+    monkeypatch.setattr(data_module, "MATH_TEST_SHA256", hashlib.sha256(test_path.read_bytes()).hexdigest())
     output = tmp_path / "processed"
     data_module.prepare_datasets(train_path, test_path, output, seed=42, dev_ratio=0.2)
 
     manifest = json.loads((output / "manifest.json").read_text())
+    assert manifest["source"]["sha256"]["train"] == data_module.MATH_TRAIN_SHA256
+    assert manifest["processed_sha256"]["dev"] == hashlib.sha256((output / "dev.parquet").read_bytes()).hexdigest()
     assert all(manifest["invariants"].values())
     cohort = manifest["cohort"]
     assert cohort["name"] == "boxed-numeric-v2"

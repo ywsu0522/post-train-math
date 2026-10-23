@@ -67,6 +67,7 @@ def test_evaluation_uses_fixed_numeric_cohort_and_grouped_accuracy(
         }
     )
     df.to_parquet(data_dir / "dev.parquet", index=False)
+    (data_dir / "manifest.json").write_text(json.dumps({"cohort": {"name": "boxed-numeric-v2"}}))
 
     metrics = evaluate(
         FakeGenerator(),
@@ -87,19 +88,20 @@ def test_evaluation_uses_fixed_numeric_cohort_and_grouped_accuracy(
         "limit": None,
     }
     assert metrics["num_examples"] == 2
-    assert metrics["num_correct"] == 1
-    assert metrics["accuracy"] == 0.5
+    assert metrics["num_correct"] == 2
+    assert metrics["accuracy"] == 1.0
     assert metrics["boxed_output_rate"] == 1.0
-    assert metrics["numeric_output_rate"] == 0.5
-    assert metrics["num_pred_numeric"] == 1
+    assert metrics["numeric_output_rate"] == 1.0
+    assert metrics["num_pred_numeric"] == 2
     records = [
         json.loads(line)
         for line in (tmp_path / "run" / "predictions.jsonl").read_text().splitlines()
     ]
-    assert [row["prediction_numeric"] for row in records] == [True, False]
+    assert [row["prediction_numeric"] for row in records] == [True, True]
     assert records[0]["pred_numerator"] == records[0]["pred_denominator"] == 1
-    assert records[1]["pred_numerator"] is None
+    assert records[1]["pred_numerator"] == 1
+    assert records[1]["pred_denominator"] == 2
     assert metrics["accuracy_by_level"]["Level 1"]["accuracy"] == 1.0
-    assert metrics["accuracy_by_level"]["Level 2"]["accuracy"] == 0.0
+    assert metrics["accuracy_by_level"]["Level 2"]["accuracy"] == 1.0
     assert metrics["accuracy_by_type"]["Algebra"]["accuracy"] == 1.0
-    assert metrics["accuracy_by_type"]["Geometry"]["accuracy"] == 0.0
+    assert metrics["accuracy_by_type"]["Geometry"]["accuracy"] == 1.0

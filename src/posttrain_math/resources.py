@@ -6,17 +6,9 @@ from pathlib import Path
 
 from huggingface_hub import HfApi, snapshot_download
 
-DEFAULT_MODEL_REPO = "allenai/OLMo-2-0425-1B"
-# Immutable upstream revision. `download_model` resolves this to the full SHA
-# again and records the result in source.json.
-DEFAULT_MODEL_REVISION = "13cece9360d59bb9db636273ea8d000b67fcc27b"
-DEFAULT_MODEL_DIR = Path("models/olmo-2-0425-1b")
-
-# Official full-weight Tülu SFT checkpoint. It is not a LoRA adapter and is
-# distinct from the original OLMo-2 1B base. Pin model AND tokenizer together.
-OFFICIAL_SFT_MODEL_REPO = "allenai/OLMo-2-0425-1B-SFT"
-OFFICIAL_SFT_MODEL_REVISION = "0d85a3d037876ce6ac7d4311d994400fc66ac27f"
-OFFICIAL_SFT_MODEL_DIR = Path("models/olmo-2-0425-1b-sft")
+DEFAULT_MODEL_REPO = "allenai/OLMo-2-0425-1B-SFT"
+DEFAULT_MODEL_REVISION = "0d85a3d037876ce6ac7d4311d994400fc66ac27f"
+DEFAULT_MODEL_DIR = Path("models/ift/olmo-2-0425-1b-sft")
 
 
 def download_model(

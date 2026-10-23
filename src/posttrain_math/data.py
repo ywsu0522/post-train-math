@@ -256,14 +256,10 @@ def download_raw_datasets(
 
 
 def assert_current_cohort(data_dir: Path) -> None:
-    """Reject stale prepared manifests after a verifier/cohort version change.
-
-    Synthetic parquet fixtures may have no manifest; real `data prepare` runs
-    always write one. A present manifest must unambiguously match this parser.
-    """
+    """Require an explicit manifest matching the current cohort."""
     manifest_path = Path(data_dir) / "manifest.json"
     if not manifest_path.is_file():
-        return
+        raise ValueError(f"Missing processed cohort manifest: {manifest_path}; run data prepare")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         name = manifest["cohort"]["name"]
@@ -272,8 +268,7 @@ def assert_current_cohort(data_dir: Path) -> None:
     if name != COHORT_NAME:
         raise ValueError(
             f"Prepared cohort is {name!r}; this code requires {COHORT_NAME!r}. "
-            "Re-run `posttrain-math data prepare --seed 42 --dev-ratio 0.1` "
-            "before training/evaluation. Keep v1 outputs separately."
+            "Re-run `posttrain-math data prepare` before evaluation."
         )
 
 
@@ -454,6 +449,13 @@ def prepare_datasets(
     seed: int,
     dev_ratio: float,
 ) -> None:
+    source_hashes = {"train": _sha256(train_path), "test": _sha256(test_path)}
+    if source_hashes != {"train": MATH_TRAIN_SHA256, "test": MATH_TEST_SHA256}:
+        raise ValueError(
+            "Raw MATH SHA256 does not match the pinned source. "
+            "Download verified files with `posttrain-math data download --output-dir <new-dir>` "
+            "then prepare with `--raw-dir <new-dir>`."
+        )
     raw_train = load_dataset(train_path)
     raw_test = load_dataset(test_path)
     _assert_preparable(raw_train, "Raw train")
@@ -535,6 +537,16 @@ def prepare_datasets(
         ),
     }
     manifest: dict[str, Any] = {
+        "source": {
+            "repo_id": MATH_DATASET_REPO,
+            "revision": MATH_DATASET_REVISION,
+            "sha256": source_hashes,
+        },
+        "processed_sha256": {
+            "train": _sha256(train_path_out),
+            "dev": _sha256(dev_path_out),
+            "test": _sha256(test_path_out),
+        },
         "raw": {
             "train_rows": len(raw_train),
             "test_rows": len(raw_test),

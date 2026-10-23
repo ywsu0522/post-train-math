@@ -1,106 +1,30 @@
-# posttrain-math
+# MATH cohort and candidate baselines
 
-Reproducible post-training experiments for mathematical language models. The
-reference pipeline uses OLMo 2 1B and Hendrycks MATH for deterministic data
-preparation, completion-only SFT, boxed-numeric evaluation, and RLVR.
+This repository records two completed pieces of work:
 
-The active evaluation/reward contract is **boxed-numeric-v2** (v1 results remain historical).
-Gold solutions are eligible only when they contain exactly one well-formed
-`\boxed{...}` whose content matches the numeric grammar below. Model outputs are scored
-by the final `\boxed{...}` marker with a small deterministic parser based on
-Python `decimal.Decimal` and `fractions.Fraction`. No symbolic or natural-language verifier participates
-in the primary RL reward.
+1. A pinned Hendrycks MATH source, deterministic train/dev split, and the
+   `boxed-numeric-v2` research cohort.
+2. The original dev baseline measurements for OLMo2-1B-SFT and Granite-3.3-2B-IFT.
 
+Training is not part of the current implementation. The next experiment is RLOO
+with `max_prompt_length = max_completion_length = 2048`, B prompts per update,
+and R rollouts per prompt. Those runs have not been completed.
 
-The research focus is not to assume that outcome RLVR directly supervises
-reasoning. The project separates two questions: **when do policy-gradient
-estimators use sparse verifier rewards efficiently, and when do higher terminal
-rewards correspond to textual intermediate states from which future success is
-actually more likely?** Training remains outcome-only; reasoning-path analysis is
-a separate diagnostic. See [`docs/rl_research.md`](docs/rl_research.md).
+## Fixed dataset and cohort
 
-The active `codex/boxed-numeric-rl` branch starts directly from `4339742`.
-Its first executable experiment is the [original-SFT RLOO pilot](docs/rloo_pilot.md)
-with a [Colab T4 notebook](docs/rloo_pilot_colab.ipynb). It uses the full numeric
-training cohort and correctness-only reward, with fixed before/after dev evaluation.
-The original research baseline remains on `master`.
+Source: `DigitalLearningGmbH/MATH-lighteval` at
+`f06834690385b29df31ccc717250746a3ba0322b` (the consolidated Hendrycks MATH data).
+The original 7,500 training problems are split into 6,750 train and 750 dev
+problems using seed 42, dev ratio 0.1, and type/level stratification. The original
+5,000 test problems remain separate. Cohort filtering preserves this split and
+includes all levels and subjects.
 
-## Reference environment
+Pinned source file SHA256:
 
-The reference GPU runtime is Linux x86_64 with:
-
-- Python 3.12;
-- the committed `uv.lock`;
-- PyTorch 2.13.0, whose locked Linux dependency set uses CUDA 13.x;
-- NVIDIA driver R580 or newer;
-- NVIDIA compute capability 7.5 or newer (Turing / SM75+).
-
-A T4 (SM75) is supported and uses FP16. Newer GPUs use BF16 automatically when
-PyTorch reports native BF16 support. Multi-GPU runs use one process per visible
-GPU and NCCL through `torchrun`.
-
-The CUDA 13 architecture and driver requirements are documented in
-[`docs/environment.md`](docs/environment.md).
-
-## Install
-
-Installation is an explicit user action. Runtime scripts never run `uv sync`.
-
-```bash
-git clone https://github.com/ywsu0522/post-train-math.git
-cd post-train-math
-
-uv sync --locked --group dev
-uv run --locked --no-sync pytest -q
-uv run --locked --no-sync posttrain-math doctor
-```
-
-`doctor` checks the installed Torch CUDA build, NVIDIA driver, visible GPUs,
-compute capability, VRAM, BF16 support, and the presence of local model/data
-resources. Model/data absence is informational so the command is useful on a
-fresh clone. The legacy `posttrain-math environment` command remains as an alias.
-
-## Pinned external resources
-
-Reference experiments do not follow mutable Hugging Face `main` branches.
-
-- model: `allenai/OLMo-2-0425-1B` at pinned revision
-  `13cece9360d59bb9db636273ea8d000b67fcc27b`;
-- dataset: the consolidated Hendrycks MATH mirror
-  `DigitalLearningGmbH/MATH-lighteval` at pinned revision
-  `f06834690385b29df31ccc717250746a3ba0322b`.
-
-The pinned dataset revision contains exactly two source Parquet files:
-`data/train-00000-of-00001.parquet` (7,500 rows) and
-`data/test-00000-of-00001.parquet` (5,000 rows). Each row already contains
-`problem`, `solution`, `type`, and `level`; the project does not download or
-reassemble seven per-subject configs.
-
-Download and prepare once:
-
-```bash
-uv run --locked --no-sync posttrain-math model download
-uv run --locked --no-sync posttrain-math data download
-uv run --locked --no-sync posttrain-math data prepare
-```
-
-Each download records the upstream resolved commit and file SHA256 values.
-`models/`, `data/`, and `runs/` remain gitignored.
-
-## boxed-numeric-v2 cohort
-
-`data prepare` retains the full rows used by SFT and adds deterministic cohort
-metadata:
-
-- `gt_boxed`
-- `gt_numerator`
-- `gt_denominator`
-- `numeric_eligible`
-- `numeric_exclusion`
-
-A gold row is eligible when its solution contains exactly one literal `\boxed`
-marker, that marker is well-formed and non-empty, and its content successfully
-parses under this grammar after stripping only leading/trailing whitespace:
+| File | SHA256 |
+| --- | --- |
+| `data/train-00000-of-00001.parquet` | `eca6e667f4305dd5e5ba09b4fd55e7f3174a0fbe361cdfd4c44758b593a76933` |
+| `data/test-00000-of-00001.parquet` | `7dca8d6e41af88ecf82f2b5f36eb5530e083aaaa86ee325f62bd5c31535178c6` |
 
 ```text
 digits         := [0-9]+
@@ -110,266 +34,79 @@ fraction_slash := ["-"] digits "/" digits
 answer         := number | fraction_latex | fraction_slash
 ```
 
-The stripped content must full-match `answer`; no internal whitespace is removed.
-Numbers are parsed exactly with `decimal.Decimal`, divided by 100 when the
-optional escaped `\%` suffix is present, then converted to `fractions.Fraction`.
-Both fraction forms are constructed with `Fraction(numerator, denominator)`;
-its native `ZeroDivisionError` is caught as an invalid parse. All accepted forms
-return exact canonical `Fraction` values. Examples include `42`, `-17`, `0.5`,
-`50\%`, `\frac{3}{5}`, `-\frac{3}{5}`, `3/5`, and `-3/5`. A plus sign, signs
-inside fraction braces or after `/`, internal whitespace (`3 / 5`), bare `%`,
-scientific notation, radicals, symbols, units, tuples, intervals, equations,
-and prose are outside this grammar. `9/0` is invalid (zero denominator).
+A gold solution must contain exactly one literal `\boxed` marker, with balanced,
+nonempty braces. After stripping outer whitespace, its content must fully match
+this grammar. Internal whitespace, plus signs, signed denominators, and zero
+denominators are rejected. Percentages are divided by 100; all accepted forms
+are compared as exact rational values using `Decimal` and `Fraction`.
 
-Historical **v1-only** audit for the pinned 12,500-row source (NOT v2 counts):
+Prediction scoring examines the final boxed marker. A malformed final marker
+does not fall back to an earlier box. No symbolic verifier or constrained decoding
+is used. The grammar and extraction rules are implemented in
+[`answers.py`](src/posttrain_math/answers.py).
 
-| split | source rows | boxed-numeric-v1 (historical) | retention |
-| --- | ---: | ---: | ---: |
-| source train | 7,500 | 5,586 | 74.48% |
-| test | 5,000 | 3,686 | 73.72% |
-| combined | 12,500 | 9,272 | 74.176% |
+Preparation verifies source hashes and records the source identity, processed
+file hashes, split settings, cohort counts, and exclusions in `manifest.json`.
+The verified current snapshot is committed as [`cohort/manifest.json`](cohort/manifest.json):
+5,029 train, 560 dev, and 3,686 test problems are eligible.
+Evaluation verifies that manifest and the processed files before loading a model.
 
-Re-run `posttrain-math data prepare --seed 42 --dev-ratio 0.1` after upgrading to
-v2 to obtain the **new** train/dev/test cohort counts from
-`data/processed/manifest.json`. Do not reuse v1's 2,402-train/266-dev counts
-or compare v1 and v2 accuracy as though they were evaluated on the same cohort.
-`data download` verifies the raw revision and SHA256 before reuse. The manifest records `source_train`,
-processed `train`/`dev`, `test`, and `combined` audits; combined counts each source
-row once. No cohort row count is hardcoded in data preparation.
+## Completed baseline measurements
 
-Historical v1 exclusions (NOT v2 counts):
+| Candidate | Correct / dev cohort | Accuracy | Completion budget |
+| --- | --- | --- | --- |
+| OLMo2-1B-SFT | 101 / 544 | 18.57% | 1024 |
+| Granite-3.3-2B-IFT | 344 / 544 | 63.24% | 1024 |
 
-| exclusion | source train | test | combined |
-| --- | ---: | ---: | ---: |
-| `non_numeric_boxed` | 1,796 | 1,224 | 3,020 |
-| `multiple_boxed` | 114 | 90 | 204 |
-| `empty_boxed` | 2 | 0 | 2 |
-| `malformed_boxed` | 2 | 0 | 2 |
-| `no_boxed` | 0 | 0 | 0 |
-| `zero_denominator` | 0 | 0 | 0 |
-| total excluded | 1,914 | 1,314 | 3,228 |
+The original ZIPs, including predictions, metrics, and reports, are stored in
+[`baselines/`](baselines/README.md), with checksums in
+[`baselines/manifest.json`](baselines/manifest.json).
 
-The processed manifest records exclusion counts and `type × level` source/cohort
-shares so selection drift is explicit. The regular train/dev split is still
-stratified on `type × level`; SFT can therefore continue to use the complete
-training split, while evaluation and RL select `numeric_eligible == True`.
+These measurements used **exact-rational-v1**, greedy decoding, and each model's
+native chat template with its recorded system prompt. They are historical
+measurements, not measurements on the current v2 cohort or at a 2048-token
+budget. They have not been relabeled or replaced. New v2 evaluations use separate
+output directories. The candidate revisions and original prompt text remain
+pinned in [`baselines.py`](src/posttrain_math/baselines.py).
 
-## Verifier contract
+## Usage
 
-For a model completion, only the **final** `\boxed` marker is considered. If the
-final marker is malformed or its content fails numeric parsing, reward is `0`.
-The verifier never falls back to an earlier box or a number in prose. It compares
-only the canonical prediction and gold `Fraction` values: equality gives `1`,
-otherwise `0`. There is no tolerance or symbolic equivalence.
-
-Examples:
-
-```text
-gold canonical Fraction = 1/2
-prediction = \boxed{\frac{2}{4}} -> correct
-prediction = \boxed{0.5}       -> correct
-prediction = \boxed{50\%}      -> correct
-prediction = \boxed{2/4}       -> correct (v2)
-prediction = \boxed{\sqrt{1/4}} -> incorrect
-prediction = "answer is 1/2"   -> incorrect
-prediction = \boxed{0.5} then \boxed{1/0} -> incorrect (no fallback)
-```
-
-The same parser is used for base OLMo, SFT checkpoints, RL checkpoints, offline
-evaluation, and RL rewards. Primary rewards are binary `{0, 1}`.
-
-## Single- and multi-GPU execution
-
-The Python core is platform-independent. The thin launch scripts only select
-one process per GPU; they do not install dependencies.
+Python 3.12 and uv are required. Model evaluation requires CUDA. Data preparation
+and unit tests can run on CPU.
 
 ```bash
-# one GPU
-bash scripts/launch_gpu.sh 1 eval --split dev --prompt boxed --batch-size 2
-
-# two GPUs
-bash scripts/launch_gpu.sh 2 eval --split dev --prompt boxed --batch-size 2
-
-# all visible GPUs
-bash scripts/launch_gpu.sh auto eval --split dev --prompt boxed --batch-size 2
+uv sync --locked --group dev
+uv run --locked posttrain-math data download
+uv run --locked posttrain-math data prepare
+uv run --locked posttrain-math model download --model-key olmo2
+uv run --locked posttrain-math model download --model-key granite
+uv run --locked posttrain-math eval --model-key olmo2 --output-dir runs/olmo2-v2-dev
+uv run --locked posttrain-math eval --model-key granite --output-dir runs/granite-v2-dev
 ```
 
-SFT uses Hugging Face Trainer/Accelerate DDP when launched with multiple
-processes. The target global batch is preserved through gradient accumulation.
+The evaluation commands above run the current v2 cohort with the retained
+1024-token default. They do not recreate the old 544-question cohort. Use
+`--max-new-tokens` explicitly for a new generation budget. `--limit` is available
+for a smoke evaluation and is recorded in the output.
 
-## SFT
+For Linux GPU environments, `bash scripts/launch_gpu.sh 2 eval --model-key granite
+--output-dir runs/granite-v2-dev-2gpu` uses two processes and merges the predictions.
+Each process has its own model copy. Output directories must be empty.
 
-First validate the completion-only data contract:
+If existing raw files fail source verification, use a new location:
 
 ```bash
-uv run --locked --no-sync posttrain-math train inspect
+uv run --locked posttrain-math data download --output-dir data/pinned-raw
+uv run --locked posttrain-math data prepare --raw-dir data/pinned-raw --output-dir data/pinned-processed
 ```
 
-Then run a one-batch LoRA overfit sanity check:
+Pass `--data-dir data/pinned-processed` to evaluation when using that location.
+Downloaded data, model weights, and new run outputs are gitignored.
+
+## Checks
 
 ```bash
-uv run --locked --no-sync posttrain-math train overfit-one-batch \
-  --peft lora \
-  --precision auto
+uv lock --check
+uv run --locked ruff check src tests
+uv run --locked pytest -q
 ```
-
-Run SFT:
-
-```bash
-bash scripts/launch_gpu.sh auto train sft \
-  --output-dir runs/olmo2-1b-lora-sft-v1 \
-  --peft lora \
-  --precision auto \
-  --gradient-checkpointing
-```
-
-SFT writes Trainer checkpoints plus `final-model/`, configuration, logs,
-summaries, plots, and `provenance.json` under the selected run directory.
-
-## Evaluation
-
-```bash
-bash scripts/launch_gpu.sh auto eval \
-  --model runs/olmo2-1b-lora-sft-v1/final-model \
-  --split dev \
-  --prompt boxed \
-  --output-dir runs/evals/olmo2-1b-lora-sft-v1
-```
-
-Evaluation automatically selects the fixed `boxed-numeric-v2` cohort and writes
-`predictions.jsonl` plus `metrics.json`. Metrics include accuracy, boxed-output
-rate, `numeric_output_rate`, and accuracy by level/type. Prediction records use
-`prediction_numeric`, and metrics count valid numeric outputs in `num_pred_numeric`.
-Re-run `data prepare` to regenerate processed metadata before evaluation or RL;
-older processed datasets and evaluation metrics are not compatible with this contract.
-
-## RLVR
-
-Full model training uses maintained TRL trainers; this repository keeps small
-reference implementations of estimator/objective formulas so the semantics are
-unit-testable without maintaining a second RL framework.
-
-The controlled first-stage matrix is:
-
-| Method | Backend | Status / contract |
-| --- | --- | --- |
-| REINFORCE | project reference objective | mathematical baseline only; no custom 1B trainer |
-| RLOO | TRL `RLOOTrainer` | leave-one-out reward baseline, no advantage normalization |
-| GRPO | TRL `GRPOTrainer` | original `loss_type="grpo"`, `scale_rewards="group"` |
-| Dr.GRPO | TRL `GRPOTrainer` | `loss_type="dr_grpo"`, `scale_rewards="none"` |
-| PPO | reference clipped objective | production backend intentionally deferred |
-
-RLOO, GRPO, and Dr.GRPO all use `num_iterations=1`. Controlled estimator
-comparisons default to `beta=0`, `temperature=1.0`, `top_p=1.0`, `top_k=0`, and
-disabled dropout. This keeps the first experiments on-policy and avoids silently
-mixing estimator changes with nucleus/temperature truncation or KL penalties.
-Every run records the explicit estimator contract and pinned TRL version in
-`run_config.json`.
-
-Run a backend with the common launcher:
-
-```bash
-# RLOO
-bash scripts/launch_rl.sh rloo auto \
-  --model runs/olmo2-1b-lora-sft-v1/final-model \
-  --output-dir runs/olmo2-1b-rloo-v1 \
-  --max-steps 100
-
-# original GRPO
-bash scripts/launch_rl.sh grpo auto \
-  --model runs/olmo2-1b-lora-sft-v1/final-model \
-  --output-dir runs/olmo2-1b-grpo-v1 \
-  --max-steps 100
-
-# Dr.GRPO
-bash scripts/launch_rl.sh dr-grpo auto \
-  --model runs/olmo2-1b-lora-sft-v1/final-model \
-  --output-dir runs/olmo2-1b-dr-grpo-v1 \
-  --max-steps 100
-```
-
-`scripts/launch_grpo.sh` remains as a backwards-compatible wrapper around
-`launch_rl.sh grpo`.
-
-Fair comparisons should be reported against generated completion/token budget,
-verifier calls, and GPU time in addition to optimizer steps. For binary reward
-and group size `G`, the predicted fraction of groups with both successes and
-failures is `1 - p^G - (1-p)^G`; comparing that prediction with observed useful
-groups is part of the planned reward-topology analysis.
-
-### Continuation-value reasoning probe
-
-Training reward remains **terminal-only**. A separate frozen-policy probe
-estimates the empirical continuation value of a textual prefix by sampling fresh
-continuations and applying the same `boxed-numeric-v1` terminal verifier.
-
-First estimate SFT prompt success probabilities on dev and freeze a frontier
-prompt set:
-
-```bash
-uv run --locked --no-sync python -m posttrain_math.reasoning_probe prompt-success \
-  --model runs/olmo2-1b-lora-sft-v1/final-model \
-  --split dev \
-  --rollouts 8 \
-  --limit-prompts 128 \
-  --output-dir runs/probes/sft-dev-prompt-success
-```
-
-Then evaluate fixed 0/25/50/75% prefixes of the pre-box span on SFT and an RL checkpoint using the
-same selection artifact:
-
-```bash
-uv run --locked --no-sync python -m posttrain_math.reasoning_probe prefix-value \
-  --model runs/olmo2-1b-grpo-v1/final-model \
-  --split dev \
-  --selection runs/probes/sft-dev-prompt-success/prompt_success.parquet \
-  --min-p 0.125 --max-p 0.875 \
-  --limit-prompts 32 \
-  --branch-rollouts 8 \
-  --output-dir runs/probes/grpo-dev-prefix-value
-```
-
-This probe measures **continuation success under the policy**, not hidden-state
-interpretability, causal faithfulness of chain-of-thought, or deterministic
-step correctness. Keyword-defined "aha moments" and process judges are deferred
-until this fixed-prefix pilot demonstrates a signal worth explaining. The full
-research contract is in [`docs/rl_research.md`](docs/rl_research.md).
-
-Evaluate a sequence of RL checkpoints with:
-
-```bash
-bash scripts/eval_checkpoints.sh auto runs/olmo2-1b-grpo-v1
-```
-## Artifact contract
-
-Local generated artifacts belong under `runs/<experiment>/`. Successful SFT and
-RL runs create `provenance.json` containing the git commit/dirty state,
-`uv.lock` hash, model and dataset source manifests, processed-data manifest, and
-hardware/runtime report. Keep configuration, logs, metrics, checkpoints needed
-for resume, and the final model/adapter together.
-
-A local workstation keeps `runs/` on its normal filesystem. Hosted notebook
-filesystems are ephemeral, so persistence is handled by the notebook workflow:
-
-- [Colab workflow](docs/colab.md)
-- [Kaggle workflow](docs/kaggle.md)
-- [Artifact and cache policy](docs/artifacts.md)
-
-## Repository directories
-
-| Path | Purpose | Git policy |
-| --- | --- | --- |
-| `src/posttrain_math/` | reusable Python implementation | committed |
-| `tests/` | CPU-testable contracts | committed |
-| `scripts/` | thin generic launch/orchestration helpers | committed |
-| `docs/` | environment and hosted-notebook procedures | committed |
-| `data/` | downloaded and derived dataset files | ignored |
-| `models/` | downloaded base-model snapshot | ignored |
-| `runs/` | training/evaluation artifacts | ignored |
-
-Dependency maintenance uses `uv lock`. Installation uses `uv sync --locked`.
-Normal execution uses `uv run --locked --no-sync`, which keeps experiment
-execution from mutating the environment.
-
-GitHub Actions runs `uv lock --check`, Ruff, and the CPU-compatible unit test
-suite on pushes to `master` and on pull requests.

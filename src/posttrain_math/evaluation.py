@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from fractions import Fraction
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ import pandas as pd
 from tabulate import tabulate
 
 from posttrain_math.answers import extract_final_boxed, parse_boxed_numeric
-from posttrain_math.data import COHORT_NAME, assert_current_cohort
+from posttrain_math.data import assert_current_cohort
 from posttrain_math.distributed import (
     barrier,
     destroy_process_group_if_owned,
@@ -18,7 +19,8 @@ from posttrain_math.distributed import (
     init_process_group_if_needed,
 )
 from posttrain_math.modeling import TextGenerator
-from posttrain_math.prompting import PromptFormatter
+
+PromptFormatter = Callable[[str], str]
 
 
 def _normalize_optional_string(value: Any) -> str | None:
@@ -104,10 +106,16 @@ def _update_group(
     key: str,
     *,
     correct: bool,
+    boxed: bool = False,
+    numeric: bool = False,
 ) -> None:
-    bucket = groups.setdefault(key, {"correct": 0, "n": 0})
+    bucket = groups.setdefault(
+        key, {"correct": 0, "n": 0, "boxed": 0, "numeric": 0}
+    )
     bucket["n"] += 1
     bucket["correct"] += int(correct)
+    bucket["boxed"] += int(boxed)
+    bucket["numeric"] += int(numeric)
 
 
 def _finalize_groups(
@@ -118,6 +126,10 @@ def _finalize_groups(
             "correct": values["correct"],
             "n": values["n"],
             "accuracy": values["correct"] / values["n"] if values["n"] else 0.0,
+            "boxed": values["boxed"],
+            "numeric": values["numeric"],
+            "boxed_rate": values["boxed"] / values["n"] if values["n"] else 0.0,
+            "numeric_rate": values["numeric"] / values["n"] if values["n"] else 0.0,
         }
         for key, values in sorted(groups.items())
     }
@@ -132,6 +144,8 @@ def _print_group_accuracy(
             key,
             f"{values['correct']} / {values['n']}",
             f"{float(values['accuracy']):.2%}",
+            f"{float(values['boxed_rate']):.2%}",
+            f"{float(values['numeric_rate']):.2%}",
         ]
         for key, values in groups.items()
     ]
@@ -140,7 +154,7 @@ def _print_group_accuracy(
     print(
         tabulate(
             rows,
-            headers=["Group", "Correct / N", "Accuracy"],
+            headers=["Group", "Correct / N", "Accuracy", "Boxed rate", "Numeric rate"],
             tablefmt="rounded_grid",
             disable_numparse=True,
         )
@@ -177,7 +191,6 @@ def _metrics_from_records(
     token_diagnostics: dict[str, Any],
     world_size: int,
     per_device_batch_size: int | None,
-    levels: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     counters = {
         "num_examples": 0,
@@ -195,8 +208,11 @@ def _metrics_from_records(
         counters["num_pred_boxed"] += int(record["pred_boxed"] is not None)
         counters["num_pred_numeric"] += int(bool(record["prediction_numeric"]))
         counters["num_correct"] += int(bool(record["correct"]))
-        _update_group(by_level, str(record["level"]), correct=bool(record["correct"]))
-        _update_group(by_type, str(record["type"]), correct=bool(record["correct"]))
+        flags = {"correct": bool(record["correct"]),
+                 "boxed": record["pred_boxed"] is not None,
+                 "numeric": bool(record["prediction_numeric"])}
+        _update_group(by_level, str(record["level"]), **flags)
+        _update_group(by_type, str(record["type"]), **flags)
 
     n = counters["num_examples"]
     accuracy = counters["num_correct"] / n if n else 0.0
@@ -220,7 +236,6 @@ def _metrics_from_records(
             "excluded_rows": excluded_rows,
             "evaluated_rows": n,
             "limit": limit,
-            **({"levels": list(levels)} if levels is not None else {}),
         },
         "token_diagnostics": token_diagnostics,
         **counters,
@@ -275,7 +290,6 @@ def evaluate(
     output_dir: Path,
     max_new_tokens: int,
     limit: int | None = None,
-    levels: tuple[int, ...] | None = None,
 ) -> dict[str, Any]:
     if max_new_tokens <= 0:
         raise ValueError("max_new_tokens must be positive")
@@ -289,12 +303,6 @@ def evaluate(
         eligible_df = source_df[
             source_df["numeric_eligible"].eq(True).fillna(False)
         ].copy()
-        if levels is not None:
-            if not levels or any(level not in range(1, 6) for level in levels):
-                raise ValueError("levels must contain integers in 1..5")
-            eligible_df = eligible_df[
-                eligible_df["level"].isin([f"Level {level}" for level in levels])
-            ].copy()
         eligible_rows = len(eligible_df)
         excluded_rows = source_rows - eligible_rows
         if eligible_rows == 0:
@@ -449,7 +457,6 @@ def evaluate(
                     if per_device_batch_size is not None
                     else None
                 ),
-                levels=levels,
             )
             metrics_path.write_text(
                 json.dumps(metrics, indent=2, ensure_ascii=False) + "\n",

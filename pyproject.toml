@@ -1,22 +1,18 @@
 [project]
 name = "posttrain-math"
 version = "0.1.0"
-description = "Reproducible MATH data preparation, OLMo post-training, boxed-numeric evaluation, and RLVR."
+description = "Pinned MATH cohort and candidate-model baseline evaluation."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "datasets>=4,<5",
     "huggingface-hub>=0.34,<2",
-    "matplotlib>=3.10,<4",
     "numpy>=2,<3",
     "pandas>=3.0.5",
-    "peft==0.20.0",
     "pyarrow>=25.0.1",
     "scikit-learn>=1.9.0",
     "tabulate>=0.10.0",
     "torch==2.13.0",
     "transformers>=5.5.3,<6",
-    "trl==1.12.0",
 ]
 
 [project.scripts]

@@ -6,15 +6,12 @@ from typing import Any, Protocol
 
 import torch
 import transformers
-from peft import PeftConfig, PeftModel
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
 )
 
-from posttrain_math.artifacts import resolve_local_base_model
 from posttrain_math.distributed import get_distributed_context
-from posttrain_math.environment import native_bf16_supported
 
 
 class TextGenerator(Protocol):
@@ -104,39 +101,15 @@ class HFModelRunner:
 
         dtype = (
             torch.bfloat16
-            if native_bf16_supported()
+            if torch.cuda.is_bf16_supported(including_emulation=False)
             else torch.float16
         )
 
-        adapter_config_path = model_path / "adapter_config.json"
-        if adapter_config_path.is_file():
-            peft_config = PeftConfig.from_pretrained(
-                model_path,
-                local_files_only=True,
-            )
-            base_model_path = resolve_local_base_model(
-                model_path,
-                str(
-                    peft_config.base_model_name_or_path
-                ),
-            )
-
-            base_model = AutoModelForCausalLM.from_pretrained(
-                base_model_path,
-                local_files_only=True,
-                dtype=dtype,
-            )
-            model = PeftModel.from_pretrained(
-                base_model,
-                model_path,
-                local_files_only=True,
-            )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                model_path,
-                local_files_only=True,
-                dtype=dtype,
-            )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_path,
+            local_files_only=True,
+            dtype=dtype,
+        )
 
         model.to(context.device)
         model.eval()
@@ -196,6 +169,7 @@ class HFModelRunner:
 
             encoded = self.tokenizer(
                 batch_prompts,
+                add_special_tokens=False,
                 return_tensors="pt",
                 padding=True,
                 truncation=False,

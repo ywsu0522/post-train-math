@@ -12,7 +12,6 @@ from posttrain_math.answers import (
     verify_boxed_numeric,
 )
 from posttrain_math.data import COHORT_NAME, assert_current_cohort
-from posttrain_math.rewards import score_boxed_numeric_completion
 
 
 @pytest.mark.parametrize(
@@ -59,10 +58,6 @@ def test_slash_equals_decimal_and_latex_for_binary_reward():
     for answer in ("9/4", "18/8", "2.25", r"\frac{9}{4}"):
         completion = r"Final: \boxed{" + answer + "}"
         assert verify_boxed_numeric(completion, numerator=9, denominator=4)
-        assert score_boxed_numeric_completion(completion, 9, 4) == 1.0
-    assert score_boxed_numeric_completion(r"\boxed{9/5}", 9, 4) == 0.0
-    assert score_boxed_numeric_completion(r"\boxed{9/0}", 9, 4) == 0.0
-    assert score_boxed_numeric_completion(r"\boxed{9/4} then \boxed{9/0}", 9, 4) == 0.0
 
 
 def test_v2_manifest_rejects_stale_v1_preparation(tmp_path):
