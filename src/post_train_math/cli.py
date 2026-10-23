@@ -17,7 +17,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--output-dir", type=Path, default=Path("data/raw"))
     download.add_argument("--force", action="store_true")
     prepare = data.add_parser(
-        "prepare", help="Split raw data, then apply boxed-numeric-v2"
+        "prepare", help="Split raw data, then apply boxed-numeric"
     )
     prepare.add_argument("--raw-dir", type=Path, default=Path("data/raw"))
     prepare.add_argument("--output-dir", type=Path, default=Path("data/processed"))
@@ -47,6 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
             )
             command.add_argument(
                 "--micro-batch", type=int, default=1, help="Sequences/device"
+            )
+            command.add_argument(
+                "--gradient-accumulation-steps",
+                type=int,
+                default=32,
+                help="Optimizer accumulation steps; B*R must equal micro-batch*world-size*steps",
+            )
+            command.add_argument(
+                "--prepare-only",
+                action="store_true",
+                help="Save the model-specific training subset on CPU without training",
             )
             command.add_argument("--max-steps", type=int, default=100)
             command.add_argument("--learning-rate", type=float, default=1e-5)

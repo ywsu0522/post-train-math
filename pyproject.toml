@@ -1,7 +1,7 @@
 [project]
 name = "post-train-math"
 version = "0.1.0"
-description = "Frozen MATH boxed-numeric-v2 cohort and pinned-checkpoint RLOO with LoRA."
+description = "Frozen MATH boxed-numeric cohort and pinned-checkpoint RLOO with LoRA."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -40,4 +40,4 @@ testpaths = ["tests"]
 [tool.uv.build-backend]
 module-name = "post_train_math"
 namespace = true
-source-include = ["cohort/manifest.json", "tests/**", "uv.lock"]
+source-include = ["cohort/**", "tests/**", "uv.lock"]

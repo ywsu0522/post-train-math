@@ -1,0 +1,44 @@
+{
+  "cohort": "boxed-numeric",
+  "counts": {
+    "cohort_train": 5029,
+    "overlong": 0,
+    "selected": 5029
+  },
+  "data_manifest_sha256": "d282bd75c15f975947286e3d4e6b12a98c88951478a4bbd42af6d6576c4fc8b6",
+  "files_sha256": {
+    "overlong_prompts.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "prompt_audit.jsonl": "95f60e8bb6c3630d9ce34401b1cd9e87c76a0246ce9ba7ad07aaae95739c794b",
+    "training_subset.jsonl": "f6003cde34b59e0993aab71f8c3f84b9ec06cbeeb97a687c099ed9db2fdc7357"
+  },
+  "model": {
+    "key": "olmo2",
+    "repo_id": "allenai/OLMo-2-0425-1B-SFT",
+    "revision": "0d85a3d037876ce6ac7d4311d994400fc66ac27f"
+  },
+  "problem_id_definition": "math- + SHA256 of the original problem text encoded as UTF-8",
+  "selection": {
+    "field": "prompt_tokens",
+    "operator": "<=",
+    "threshold": 2048
+  },
+  "split": "train",
+  "tokenization": {
+    "add_generation_prompt": true,
+    "chat_template": "{{ bos_token }}{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|system|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'user' %}{{ '<|user|>\n' + message['content'] + '\n' }}{% elif message['role'] == 'assistant' %}{% if not loop.last %}{{ '<|assistant|>\n'  + message['content'] + eos_token + '\n' }}{% else %}{{ '<|assistant|>\n'  + message['content'] + eos_token }}{% endif %}{% endif %}{% if loop.last and add_generation_prompt %}{{ '<|assistant|>\n' }}{% endif %}{% endfor %}",
+    "chat_template_sha256": "fe689ffbd6a4e2d0532d7480696b065b10e0e1eff3f9b9fc4bea415761e4bf4a",
+    "padding": false,
+    "special_tokens_map": {
+      "bos_token": "<|endoftext|>",
+      "eos_token": "<|endoftext|>",
+      "pad_token": "<|pad|>",
+      "unk_token": "<|endoftext|>"
+    },
+    "system_prompt": "You are a patient and concise mathematics tutor. Solve the given mathematics problem carefully. Explain only the steps necessary to justify the result. Finish with exactly one final answer in LaTeX \\boxed{...}. For a rational answer, put an integer or a reduced fraction p/q inside the box; do not use decimals or extra text inside the box. Do not put any earlier intermediate expressions in boxes. Stop after the final boxed answer.",
+    "tokenizer_class": "TokenizersBackend",
+    "tokenizer_state_sha256": "f7499d393a5a28519bdb8de7300c517e1fb58070cfc36a25dbaecf426f824eb8",
+    "tokenizers_version": "0.23.1",
+    "transformers_version": "5.16.1",
+    "truncation": false
+  }
+}

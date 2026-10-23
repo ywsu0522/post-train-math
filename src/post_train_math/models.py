@@ -160,10 +160,14 @@ def download_model(
     return output_dir
 
 
-def load_tokenizer(model_dir: Path):
+def load_tokenizer(model_dir: Path | str, *, revision: str | None = None):
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_dir,
+        revision=revision,
+        local_files_only=revision is None,
+    )
     if tokenizer.pad_token_id is None:
         if tokenizer.eos_token_id is None:
             raise ValueError("Tokenizer needs a pad or EOS token")

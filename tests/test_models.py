@@ -58,7 +58,7 @@ def test_current_cohort_requires_verified_source_and_unchanged_files(
     for split, path in paths.items():
         path.write_bytes(split.encode())
     manifest = {
-        "cohort": {"name": "boxed-numeric-v2", "definition": data.COHORT_DEFINITION},
+        "cohort": {"name": "boxed-numeric", "definition": data.COHORT_DEFINITION},
         "pipeline": data.PIPELINE,
         "split": {"seed": 42, "dev_ratio": 0.1, "stratify": ["type", "level"]},
         "source": {
@@ -102,6 +102,20 @@ def test_cli_exposes_four_workflows():
             [command, "--model-key", "olmo2", "--output-dir", "runs/test"]
         )
         assert args.command == command
+    train = parser.parse_args(
+        [
+            "train",
+            "--model-key",
+            "olmo2",
+            "--output-dir",
+            "runs/test",
+            "--gradient-accumulation-steps",
+            "16",
+            "--prepare-only",
+        ]
+    )
+    assert train.gradient_accumulation_steps == 16
+    assert train.prepare_only
     for command in ("rloo", "grpo", "doctor"):
         with pytest.raises(SystemExit):
             parser.parse_args([command])

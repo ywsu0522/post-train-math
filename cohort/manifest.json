@@ -1,4 +1,9 @@
 {
+  "pipeline": [
+    "split_raw_train",
+    "annotate_each_split",
+    "filter_numeric_eligible"
+  ],
   "source": {
     "repo_id": "DigitalLearningGmbH/MATH-lighteval",
     "revision": "f06834690385b29df31ccc717250746a3ba0322b",
@@ -30,7 +35,7 @@
     "test_rows": 5000
   },
   "cohort": {
-    "name": "boxed-numeric-v2",
+    "name": "boxed-numeric",
     "definition": "gold solution contains exactly one literal \\boxed marker, well-formed and non-empty; strip outer whitespace then full-match number := -?digits(.digits)?(\\%)?; fraction_latex := -?\\frac{digits}{digits}; fraction_slash := -?digits/digits; digits := [0-9]+; numbers parsed with decimal.Decimal, percentages divided by 100; all paths canonicalized with fractions.Fraction; parse failures including zero denominators are invalid",
     "source_train": {
       "source_rows": 7500,
@@ -95,10 +100,5 @@
     "recover_annotated_raw_train": true,
     "raw_test_preserved": true,
     "cohort_metadata_exists": true
-  },
-  "pipeline": [
-    "split_raw_train",
-    "annotate_each_split",
-    "filter_numeric_eligible"
-  ]
+  }
 }

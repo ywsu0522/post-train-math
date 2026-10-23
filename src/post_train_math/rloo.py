@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from importlib.metadata import version
 from pathlib import Path
 
 from post_train_math.answers import numeric_reward
-from post_train_math.data import load_cohort, validate_processed_manifest
+from post_train_math.data import COHORT_NAME, load_cohort, validate_processed_manifest
 from post_train_math.models import (
     MODELS,
     load_tokenizer,
@@ -17,19 +19,154 @@ from post_train_math.models import (
 
 MAX_PROMPT_LENGTH = 2048
 MAX_COMPLETION_LENGTH = 2048
+FROZEN_TRAIN_ROWS = 5029
 
 
-def batch_accumulation(
-    prompts: int, rollouts: int, micro_batch: int, world_size: int
-) -> int:
-    if prompts < 1 or rollouts < 2 or micro_batch < 1 or world_size < 1:
+def validate_batch(
+    prompts: int,
+    rollouts: int,
+    micro_batch: int,
+    world_size: int,
+    gradient_accumulation_steps: int,
+) -> None:
+    if (
+        prompts < 1
+        or rollouts < 2
+        or micro_batch < 1
+        or world_size < 1
+        or gradient_accumulation_steps < 1
+    ):
         raise ValueError(
-            "B, micro-batch and world size must be positive; R must be >= 2"
+            "B, micro-batch, world size and accumulation must be positive; R must be >= 2"
         )
-    sequences = prompts * rollouts
-    if sequences % (micro_batch * world_size):
-        raise ValueError("B * R must be divisible by micro-batch * world size")
-    return sequences // (micro_batch * world_size)
+    if prompts * rollouts != micro_batch * world_size * gradient_accumulation_steps:
+        raise ValueError(
+            "B * R must equal micro-batch * world-size * gradient-accumulation-steps "
+            "to keep one optimizer update per rollout batch"
+        )
+
+
+def _json_bytes(value) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def prepare_training_subset(
+    frame,
+    tokenizer,
+    spec,
+    data_manifest_hash: str,
+    output_dir: Path,
+    *,
+    write_artifacts: bool = True,
+) -> tuple[list[dict], dict]:
+    """Audit every frozen train question using the same native template as TRL."""
+    template = tokenizer.get_chat_template()
+    selected, audit, overlong = [], [], []
+    seen = set()
+    for row in frame.itertuples(index=False):
+        problem_id = "math-" + hashlib.sha256(row.problem.encode("utf-8")).hexdigest()
+        if problem_id in seen:
+            raise ValueError(f"Duplicate train problem ID: {problem_id}")
+        seen.add(problem_id)
+        prompt = make_chat_messages(spec, row.problem)
+        encoded = tokenizer.apply_chat_template(
+            prompt,
+            tokenize=True,
+            add_generation_prompt=True,
+            truncation=False,
+            padding=False,
+            return_dict=True,
+        )
+        token_ids = encoded["input_ids"]
+        prompt_tokens = len(token_ids)
+        included = prompt_tokens <= MAX_PROMPT_LENGTH
+        entry = {
+            "problem_id": problem_id,
+            "prompt_tokens": prompt_tokens,
+            "type": row.type,
+            "level": row.level,
+            "included": included,
+            "prompt_token_ids_sha256": hashlib.sha256(
+                _json_bytes(token_ids)
+            ).hexdigest(),
+        }
+        audit.append(entry)
+        if included:
+            selected.append(
+                {
+                    **entry,
+                    "prompt": prompt,
+                    "gt_numerator": int(row.gt_numerator),
+                    "gt_denominator": int(row.gt_denominator),
+                }
+            )
+        else:
+            overlong.append(entry)
+    # Record the actual tokenizer state as well as the pinned checkpoint identity.
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    tokenizer_state = (
+        backend.to_str().encode("utf-8")
+        if backend is not None
+        else _json_bytes(tokenizer.get_vocab())
+    )
+    artifacts = {
+        "training_subset.jsonl": selected,
+        "prompt_audit.jsonl": audit,
+        "overlong_prompts.jsonl": overlong,
+    }
+    payloads = {
+        name: b"".join(_json_bytes(row) + b"\n" for row in rows)
+        for name, rows in artifacts.items()
+    }
+    definition = {
+        "cohort": COHORT_NAME,
+        "split": "train",
+        "data_manifest_sha256": data_manifest_hash,
+        "problem_id_definition": "math- + SHA256 of the original problem text encoded as UTF-8",
+        "model": {"key": spec.key, "repo_id": spec.repo_id, "revision": spec.revision},
+        "tokenization": {
+            "chat_template": template,
+            "chat_template_sha256": hashlib.sha256(
+                template.encode("utf-8")
+            ).hexdigest(),
+            "system_prompt": spec.system_prompt,
+            "tokenizer_class": type(tokenizer).__name__,
+            "tokenizer_state_sha256": hashlib.sha256(tokenizer_state).hexdigest(),
+            "special_tokens_map": tokenizer.special_tokens_map,
+            "add_generation_prompt": True,
+            "truncation": False,
+            "padding": False,
+            "transformers_version": version("transformers"),
+            "tokenizers_version": version("tokenizers"),
+        },
+        "selection": {
+            "field": "prompt_tokens",
+            "operator": "<=",
+            "threshold": MAX_PROMPT_LENGTH,
+        },
+        "counts": {
+            "cohort_train": len(audit),
+            "selected": len(selected),
+            "overlong": len(overlong),
+        },
+        "files_sha256": {
+            name: hashlib.sha256(payload).hexdigest()
+            for name, payload in payloads.items()
+        },
+    }
+    if write_artifacts:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for name, payload in payloads.items():
+            (output_dir / name).write_bytes(payload)
+        (output_dir / "training_subset_manifest.json").write_bytes(
+            json.dumps(definition, ensure_ascii=False, sort_keys=True, indent=2).encode(
+                "utf-8"
+            )
+            + b"\n"
+        )
+    return selected, definition
 
 
 def build_config(
@@ -39,6 +176,7 @@ def build_config(
     rollouts: int,
     micro_batch: int,
     world_size: int,
+    gradient_accumulation_steps: int,
     max_steps: int,
     learning_rate: float,
     use_cpu: bool = False,
@@ -46,18 +184,20 @@ def build_config(
     import torch
     from trl import RLOOConfig
 
-    accumulation = batch_accumulation(prompts, rollouts, micro_batch, world_size)
+    validate_batch(
+        prompts, rollouts, micro_batch, world_size, gradient_accumulation_steps
+    )
     if max_steps < 1 or learning_rate <= 0:
         raise ValueError("max-steps and learning-rate must be positive")
     return RLOOConfig(
         output_dir=str(output_dir),
         per_device_train_batch_size=micro_batch,
-        gradient_accumulation_steps=accumulation,
+        gradient_accumulation_steps=gradient_accumulation_steps,
         generation_batch_size=prompts * rollouts,
         num_generations=rollouts,
         num_iterations=1,
         max_completion_length=MAX_COMPLETION_LENGTH,
-        chat_template_kwargs={"truncation": True, "max_length": MAX_PROMPT_LENGTH},
+        chat_template_kwargs={"truncation": False},
         max_steps=max_steps,
         learning_rate=learning_rate,
         beta=0.05,
@@ -80,18 +220,43 @@ def build_config(
 
 
 def run_train(args) -> None:
+    if args.output_dir.exists() and any(args.output_dir.iterdir()):
+        raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
+    manifest, manifest_hash = validate_processed_manifest(args.data_dir)
+    spec = MODELS[args.model_key]
+    model_dir = args.model_dir or Path(spec.local_dir)
+    frame = load_cohort(args.data_dir, "train")
+    if len(frame) != FROZEN_TRAIN_ROWS:
+        raise ValueError(
+            f"Expected the fixed {FROZEN_TRAIN_ROWS}-question boxed-numeric train cohort"
+        )
+    if args.prepare_only and args.model_dir is None and not model_dir.exists():
+        # CPU audit needs only the tokenizer at the exact pinned commit, not weights.
+        tokenizer = load_tokenizer(spec.repo_id, revision=spec.revision)
+        source = None
+    else:
+        source = validate_model_source(model_dir, spec)
+        tokenizer = load_tokenizer(model_dir)
+    if args.prepare_only:
+        is_main_process = int(os.environ.get("RANK", "0")) == 0
+        _, subset = prepare_training_subset(
+            frame,
+            tokenizer,
+            spec,
+            manifest_hash,
+            args.output_dir,
+            write_artifacts=is_main_process,
+        )
+        if is_main_process:
+            print(json.dumps(subset["counts"], indent=2))
+        return
+
     import torch
     from datasets import Dataset
     from peft import LoraConfig
     from transformers import AutoModelForCausalLM, set_seed
     from trl import RLOOTrainer
 
-    if args.output_dir.exists() and any(args.output_dir.iterdir()):
-        raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
-    manifest, manifest_hash = validate_processed_manifest(args.data_dir)
-    spec = MODELS[args.model_key]
-    model_dir = args.model_dir or Path(spec.local_dir)
-    source = validate_model_source(model_dir, spec)
     if not torch.cuda.is_available():
         raise RuntimeError("RLOO training requires CUDA")
     config = build_config(
@@ -100,23 +265,24 @@ def run_train(args) -> None:
         rollouts=args.rollouts,
         micro_batch=args.micro_batch,
         world_size=int(os.environ.get("WORLD_SIZE", "1")),
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_steps=args.max_steps,
         learning_rate=args.learning_rate,
     )
     set_seed(config.seed)
-    tokenizer = load_tokenizer(model_dir)
-    tokenizer.truncation_side = "left"
-    frame = load_cohort(args.data_dir, "train")
-    dataset = Dataset.from_list(
-        [
-            {
-                "prompt": make_chat_messages(spec, row.problem),
-                "gt_numerator": int(row.gt_numerator),
-                "gt_denominator": int(row.gt_denominator),
-            }
-            for row in frame.itertuples(index=False)
-        ]
+    records, subset = prepare_training_subset(
+        frame,
+        tokenizer,
+        spec,
+        manifest_hash,
+        args.output_dir,
+        write_artifacts=config.process_index == 0,
     )
+    if not records:
+        raise ValueError(
+            "No training prompts fit the 2048-token budget; see prompt_audit.jsonl"
+        )
+    dataset = Dataset.from_list(records)
     model = AutoModelForCausalLM.from_pretrained(
         model_dir,
         local_files_only=True,
@@ -147,11 +313,17 @@ def run_train(args) -> None:
             "model_source": source,
             "data_manifest_sha256": manifest_hash,
             "cohort": manifest["cohort"]["name"],
-            "train_rows": len(frame),
+            "cohort_train_rows": len(frame),
+            "train_rows": len(records),
+            "training_subset": subset,
+            "training_subset_manifest_sha256": hashlib.sha256(
+                (args.output_dir / "training_subset_manifest.json").read_bytes()
+            ).hexdigest(),
             "prompts_per_update": args.prompts_per_update,
             "rollouts_per_prompt": args.rollouts,
             "max_prompt_length": MAX_PROMPT_LENGTH,
-            "prompt_overflow": "left truncation; no rows removed",
+            "gradient_accumulation_steps": args.gradient_accumulation_steps,
+            "prompt_overflow": "exclude prompt_tokens > 2048; no truncation",
             "max_completion_length": MAX_COMPLETION_LENGTH,
             "reference_policy": "pinned base with LoRA disabled",
             "training_config": config.to_dict(),

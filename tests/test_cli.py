@@ -18,7 +18,7 @@ def test_eval_scores_continuations_and_preserves_native_bos(tmp_path, monkeypatc
         data,
         "validate_processed_manifest",
         lambda _: (
-            {"cohort": {"name": "boxed-numeric-v2"}},
+            {"cohort": {"name": "boxed-numeric"}},
             "manifest-hash",
         ),
     )

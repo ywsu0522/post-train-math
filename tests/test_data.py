@@ -104,7 +104,7 @@ def test_prepare_numeric_metadata_and_cohort_audit(tmp_path: Path, monkeypatch) 
     )
     assert all(manifest["invariants"].values())
     cohort = manifest["cohort"]
-    assert cohort["name"] == "boxed-numeric-v2"
+    assert cohort["name"] == "boxed-numeric"
     assert cohort["source_train"]["eligible_rows"] == 30
     assert cohort["test"]["eligible_rows"] == 20
     assert cohort["combined"]["source_rows"] == 80

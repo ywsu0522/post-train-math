@@ -1,6 +1,6 @@
 # post-train-math
 
-Pinned Hendrycks MATH data, the frozen `boxed-numeric-v2` cohort, and RLOO
+Pinned Hendrycks MATH data, the frozen `boxed-numeric` cohort, and RLOO
 training with TRL + PEFT for two pinned checkpoints. Python 3.12 and uv are
 required. Data preparation and tests run on CPU; evaluation and training require CUDA.
 
@@ -12,7 +12,7 @@ The order is fixed in code and `cohort/manifest.json`:
 2. Split **all 7,500 original train problems** into **6,750 train / 750 dev**
    with seed 42, dev ratio 0.1, and type/level stratification.
 3. Keep the **original 5,000 test problems unchanged**, including their order.
-4. Apply the **same** `boxed-numeric-v2` rule independently within train, dev,
+4. Apply the **same** `boxed-numeric` rule independently within train, dev,
    and test. Never filter before splitting or re-split the eligible subset.
 
 The source is `DigitalLearningGmbH/MATH-lighteval` at
@@ -74,7 +74,7 @@ uv run --locked post-train-math eval --model-key olmo2 --output-dir runs/olmo2-d
 uv run --locked post-train-math eval --model-key granite --output-dir runs/granite-dev
 
 # 4. Train a LoRA adapter with RLOO.
-uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --prompts-per-update 8 --rollouts 4 --max-steps 100
+uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --prompts-per-update 8 --rollouts 4 --gradient-accumulation-steps 32 --max-steps 100
 
 # Evaluate the trained adapter.
 uv run --locked post-train-math eval --model-key olmo2 --adapter-dir runs/olmo2-rloo/adapter --output-dir runs/olmo2-rloo-dev
@@ -92,31 +92,80 @@ evaluation. Model/data directories may be overridden with `--model-dir` and
 
 Both models use their native chat templates and explicit fixed system prompts.
 Training reads only the train cohort. Dev and test are used by the evaluation
-workflow. Training saves `adapter/` and `train_report.json`; evaluation saves
+workflow. Training saves `adapter/`, `train_report.json`, and the subset audit below; evaluation saves
 `predictions.jsonl` and `eval_report.json`.
 
 RLOO uses TRL 1.12.0 and PEFT 0.20.0. `B` is the global number of prompts per
 optimizer update and `R >= 2` is the number of rollouts per prompt. The global
-sequence batch is `B * R`; gradient accumulation is
-`B * R / (micro_batch * world_size)` and must be an integer. Each rollout batch
+sequence batch is `B * R`. Set gradient accumulation with
+`--gradient-accumulation-steps` (default 32). The CLI does not derive or override
+it: `B * R = micro_batch * world_size * gradient_accumulation_steps` is required.
+Inconsistent settings fail before loading model weights. Each rollout batch
 has one optimizer update (`num_iterations=1`). LoRA uses rank 16, alpha 32,
 zero dropout and all linear layers. The pinned base with adapters disabled is
 the fixed reference policy, with KL coefficient 0.05. Advantages are not
 normalized. Sampling uses temperature 1.0 without top-k/top-p restriction.
 See the [TRL RLOO reference](https://huggingface.co/docs/trl/rloo_trainer).
 
-Prompt and completion budgets are both 2,048 tokens for training and evaluation.
-Overlong prompts are truncated from the left after the native chat template;
-this does not remove or move problems. Training uses seed 42, gradient
-checkpointing, and BF16 when available, otherwise FP16. For multiple GPUs, use
-`accelerate launch --num_processes 2 -m post_train_math.cli train ...`; `B` remains
-global. Evaluation runs on one GPU.
+Training starts from exactly the frozen **5,029** `boxed-numeric` train problems.
+For each model, it tokenizes every full conversation with that model's actual
+chat template, including the fixed system prompt, role/BOS tokens, and assistant
+generation prefix. `tokenize=True`, `add_generation_prompt=True`,
+`truncation=False`, and `padding=False` are explicit. Only problems with
+`prompt_tokens <= 2048` enter RLOO. RLOO also disables truncation and uses the
+same conversation and template settings. The underlying cohort and all split
+memberships remain fixed; the training subset is specific to each model.
+The completion budget remains 2,048 tokens.
+
+Before loading model weights, training saves these files in its output directory:
+
+| File | Contents |
+| --- | --- |
+| `prompt_audit.jsonl` | All 5,029 problem IDs, full prompt token counts, subject (`type`), difficulty (`level`), selection decisions, and token-ID hashes |
+| `overlong_prompts.jsonl` | Excluded problem IDs, token counts, subject, and difficulty; empty if none |
+| `training_subset.jsonl` | Every selected record, including exact chat messages, gold rational values, ID, token count, subject, and difficulty |
+| `training_subset_manifest.json` | Parent data manifest hash, checkpoint commit, actual chat template and hash, tokenizer state hash, special tokens, library versions, selection rule, counts, and artifact SHA256 hashes |
+
+The source has no native problem ID. `problem_id` is `math-` followed by SHA256
+of the original problem text encoded as UTF-8. It is stable across models.
+Subset definitions and JSONL records are deterministic for the same source and
+tokenizer. The training report also records the subset manifest hash.
+
+Prepare and inspect a subset on CPU, without downloading model weights:
+
+```bash
+uv run --locked post-train-math train --model-key olmo2 --prepare-only --output-dir runs/olmo2-subset
+uv run --locked post-train-math train --model-key granite --prepare-only --output-dir runs/granite-subset
+```
+
+When no local model directory exists, `--prepare-only` fetches only the tokenizer
+from the pinned checkpoint. A later training run recomputes and saves its own
+subset in a fresh output directory. Dev/test evaluation keeps its existing left
+truncation policy and does not apply the training-only length filter.
+
+The saved audits in `cohort/training-subsets/` use the pinned checkpoints above:
+
+| Model | Audited | Selected | Overlong | Maximum prompt tokens |
+| --- | ---: | ---: | ---: | ---: |
+| OLMo2 | 5,029 | 5,029 | 0 | 1,350 |
+| Granite | 5,029 | 5,029 | 0 | 1,502 |
+
+Both models currently retain all 5,029 problems. Their overlong JSONL files are
+empty; the filter and 2048/2049-token boundary remain enforced.
+
+Training uses seed 42, gradient checkpointing, and BF16 when available, otherwise
+FP16. For two GPUs with B=8, R=4, micro-batch=1, specify
+`--gradient-accumulation-steps 16` with
+`accelerate launch --num_processes 2 -m post_train_math.cli train ...`.
+Evaluation runs on one GPU.
 
 ## Repository
 
 ```text
 post-train-math/
-├── cohort/manifest.json
+├── cohort/
+│   ├── manifest.json
+│   └── training-subsets/  # saved native-tokenizer audits for both checkpoints
 ├── src/post_train_math/
 │   ├── answers.py
 │   ├── data.py
@@ -143,7 +192,8 @@ uv build
 ```
 
 Tests cover the grammar, strict gold-box requirement, reward, split-before-filter
-membership, source/file integrity, model pins, all four CLI workflows, and a
+membership, source/file integrity, model pins, explicit batch settings, native
+chat token counts, the 2048/2049-token boundary, saved subset hashes, all four CLI workflows, and a
 small real TRL/PEFT CPU training step with adapter export. They do not run the
 full GPU experiment or claim any model accuracy. Historical baseline artifacts
 and local experiments have been removed.

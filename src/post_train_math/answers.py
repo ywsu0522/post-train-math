@@ -185,7 +185,7 @@ def _parse_boxed_numeric_with_reason(
 
 
 def parse_boxed_numeric(text: str | None) -> Fraction | None:
-    """Parse the boxed-numeric-v2 answer grammar.
+    """Parse the boxed-numeric answer grammar.
 
     Strip outer whitespace, then full-match a number (optional minus, digits,
     optional decimal digits, optional ``\\%``), a LaTeX fraction
@@ -198,7 +198,7 @@ def parse_boxed_numeric(text: str | None) -> Fraction | None:
 
 
 def classify_boxed_numeric_solution(solution: str) -> NumericGold:
-    """Classify a gold MATH solution for the boxed-numeric-v2 cohort."""
+    """Classify a gold MATH solution for the boxed-numeric cohort."""
     scan = scan_boxed(solution)
 
     if scan.marker_count == 0:

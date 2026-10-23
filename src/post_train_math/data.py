@@ -31,7 +31,7 @@ MATH_TRAIN_FILE = "data/train-00000-of-00001.parquet"
 MATH_TEST_FILE = "data/test-00000-of-00001.parquet"
 MATH_TRAIN_SHA256 = "eca6e667f4305dd5e5ba09b4fd55e7f3174a0fbe361cdfd4c44758b593a76933"
 MATH_TEST_SHA256 = "7dca8d6e41af88ecf82f2b5f36eb5530e083aaaa86ee325f62bd5c31535178c6"
-COHORT_NAME = "boxed-numeric-v2"
+COHORT_NAME = "boxed-numeric"
 PIPELINE = ["split_raw_train", "annotate_each_split", "filter_numeric_eligible"]
 FROZEN_PROCESSED_SHA256 = {
     "train": "89cefedbc66bb6b4095d1ca03336fc23dbeaf9a03b298027560428081390b2f0",
@@ -325,7 +325,7 @@ def _classification_columns(classification: NumericGold) -> tuple[Any, ...]:
 
 
 def annotate_numeric_cohort(df: pd.DataFrame) -> pd.DataFrame:
-    """Annotate rows with deterministic boxed-numeric-v2 gold metadata."""
+    """Annotate rows with deterministic boxed-numeric gold metadata."""
     result = df.copy()
     classifications = [
         classify_boxed_numeric_solution(str(solution))
