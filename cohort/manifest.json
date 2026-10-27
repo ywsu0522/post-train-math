@@ -1,6 +1,6 @@
 {
   "pipeline": [
-    "split_raw_train",
+    "preserve_source_splits",
     "annotate_each_split",
     "filter_numeric_eligible"
   ],
@@ -13,31 +13,21 @@
     }
   },
   "processed_sha256": {
-    "train": "89cefedbc66bb6b4095d1ca03336fc23dbeaf9a03b298027560428081390b2f0",
-    "dev": "e11a6890bdccc69f8bbaa654ebba7816e12d12b1ac01d23f7782b435609c489f",
+    "train": "2b59d6bf0529c379cb1b1eb29a48ad00beb24998057b3a7e8f5dab1b55de7039",
     "test": "212692024d4104b5ab778738e5dd618ca4514e1d85d8290d2735bc8554e0bcc0"
   },
   "raw": {
     "train_rows": 7500,
     "test_rows": 5000
   },
-  "split": {
-    "seed": 42,
-    "dev_ratio": 0.1,
-    "stratify": [
-      "type",
-      "level"
-    ]
-  },
   "processed": {
-    "train_rows": 6750,
-    "dev_rows": 750,
+    "train_rows": 7500,
     "test_rows": 5000
   },
   "cohort": {
     "name": "boxed-numeric",
     "definition": "gold solution contains exactly one literal \\boxed marker, well-formed and non-empty; strip outer whitespace then full-match number := -?digits(.digits)?(\\%)?; fraction_latex := -?\\frac{digits}{digits}; fraction_slash := -?digits/digits; digits := [0-9]+; numbers parsed with decimal.Decimal, percentages divided by 100; all paths canonicalized with fractions.Fraction; parse failures including zero denominators are invalid",
-    "source_train": {
+    "train": {
       "source_rows": 7500,
       "eligible_rows": 5589,
       "excluded_rows": 1911,
@@ -47,29 +37,6 @@
         "malformed_boxed": 2,
         "multiple_boxed": 114,
         "non_numeric_boxed": 1793
-      }
-    },
-    "train": {
-      "source_rows": 6750,
-      "eligible_rows": 5029,
-      "excluded_rows": 1721,
-      "retention": 0.745037037037037,
-      "exclusion_counts": {
-        "empty_boxed": 2,
-        "malformed_boxed": 1,
-        "multiple_boxed": 100,
-        "non_numeric_boxed": 1618
-      }
-    },
-    "dev": {
-      "source_rows": 750,
-      "eligible_rows": 560,
-      "excluded_rows": 190,
-      "retention": 0.7466666666666667,
-      "exclusion_counts": {
-        "malformed_boxed": 1,
-        "multiple_boxed": 14,
-        "non_numeric_boxed": 175
       }
     },
     "test": {
@@ -96,8 +63,8 @@
     }
   },
   "invariants": {
-    "train_dev_disjoint": true,
-    "recover_annotated_raw_train": true,
+    "train_test_disjoint": true,
+    "raw_train_preserved": true,
     "raw_test_preserved": true,
     "cohort_metadata_exists": true
   }

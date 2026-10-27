@@ -1,0 +1,2 @@
+# These artifacts are hashed by training definitions; keep bytes stable across OSes.
+cohort/** text eol=lf

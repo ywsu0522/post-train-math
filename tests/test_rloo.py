@@ -124,6 +124,7 @@ def test_real_trl_peft_cpu_step_and_adapter_save(tmp_path, monkeypatch):
     assert config.optim == "adamw_torch"
     assert config.warmup_steps == 0
     assert config.save_strategy == "steps" and config.save_steps == 50
+    assert config.save_total_limit is None
     assert not config.save_only_model
     config.max_completion_length = 4
     config.disable_tqdm = True
@@ -323,7 +324,7 @@ def test_saved_native_tokenizer_audit_matches_frozen_contract(model_key):
         "repo_id": spec.repo_id,
         "revision": spec.revision,
     }
-    assert definition["counts"]["cohort_train"] == 5029
+    assert definition["counts"]["cohort_train"] == 5589
     assert definition["tokenization"]["truncation"] is False
     assert definition["tokenization"]["add_generation_prompt"] is True
     for name, digest in definition["files_sha256"].items():
@@ -340,7 +341,7 @@ def test_saved_native_tokenizer_audit_matches_frozen_contract(model_key):
         .read_text(encoding="utf-8")
         .splitlines()
     ]
-    assert len(audit) == len({record["problem_id"] for record in audit}) == 5029
+    assert len(audit) == len({record["problem_id"] for record in audit}) == 5589
     assert {record["problem_id"] for record in selected} == {
         record["problem_id"] for record in audit if record["prompt_tokens"] <= 2048
     }

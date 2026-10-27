@@ -54,13 +54,12 @@ def test_current_cohort_requires_verified_source_and_unchanged_files(
 
     with pytest.raises(ValueError, match="Missing processed"):
         validate_processed_manifest(tmp_path)
-    paths = {split: tmp_path / f"{split}.parquet" for split in ("train", "dev", "test")}
+    paths = {split: tmp_path / f"{split}.parquet" for split in ("train", "test")}
     for split, path in paths.items():
         path.write_bytes(split.encode())
     manifest = {
         "cohort": {"name": "boxed-numeric", "definition": data.COHORT_DEFINITION},
         "pipeline": data.PIPELINE,
-        "split": {"seed": 42, "dev_ratio": 0.1, "stratify": ["type", "level"]},
         "source": {
             "repo_id": data.MATH_DATASET_REPO,
             "revision": data.MATH_DATASET_REVISION,
@@ -74,8 +73,8 @@ def test_current_cohort_requires_verified_source_and_unchanged_files(
     monkeypatch.setattr(data, "FROZEN_PROCESSED_SHA256", manifest["processed_sha256"])
     (tmp_path / "manifest.json").write_text(json.dumps(manifest))
     assert validate_processed_manifest(tmp_path)[0] == manifest
-    paths["dev"].write_bytes(b"changed")
-    with pytest.raises(ValueError, match="dev SHA256 mismatch"):
+    paths["test"].write_bytes(b"changed")
+    with pytest.raises(ValueError, match="test SHA256 mismatch"):
         validate_processed_manifest(tmp_path)
 
 
@@ -86,7 +85,7 @@ def test_prepare_rejects_unverified_raw_files_before_writing(tmp_path):
     train.write_bytes(b"unverified train")
     test.write_bytes(b"unverified test")
     with pytest.raises(ValueError, match="Raw MATH SHA256"):
-        prepare_datasets(train, test, output, seed=42, dev_ratio=0.1)
+        prepare_datasets(train, test, output)
     assert not output.exists()
 
 
@@ -102,6 +101,18 @@ def test_cli_exposes_four_workflows():
             [command, "--model-key", "olmo2", "--output-dir", "runs/test"]
         )
         assert args.command == command
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "eval",
+                "--model-key",
+                "olmo2",
+                "--output-dir",
+                "runs/test",
+                "--split",
+                "train",
+            ]
+        )
     train = parser.parse_args(
         [
             "train",
@@ -122,6 +133,25 @@ def test_cli_exposes_four_workflows():
     assert train.per_device_train_batch_size == 2
     assert train.resume_from_checkpoint == Path("runs/test/checkpoint-50")
     assert train.prepare_only
+    plan = parser.parse_args(
+        [
+            "eval-series",
+            "--model-key",
+            "olmo2",
+            "--run-dir",
+            "runs/train",
+            "--output-dir",
+            "runs/evaluation",
+        ]
+    )
+    assert plan.steps == [50, 100, 150, 200]
+    assert plan.test_set == "fixed512" and plan.include_base
+    assert (
+        parser.parse_args(
+            ["train", "--model-key", "olmo2", "--output-dir", "runs/train"]
+        ).max_steps
+        == 200
+    )
     with pytest.raises(SystemExit):
         parser.parse_args(
             [

@@ -1,15 +1,15 @@
 {
   "cohort": "boxed-numeric",
   "counts": {
-    "cohort_train": 5029,
+    "cohort_train": 5589,
     "overlong": 0,
-    "selected": 5029
+    "selected": 5589
   },
-  "data_manifest_sha256": "d282bd75c15f975947286e3d4e6b12a98c88951478a4bbd42af6d6576c4fc8b6",
+  "data_manifest_sha256": "23a69e2a61a8595e86749b16b01f9da72532585d05ea77b7f3ad66f1f1304448",
   "files_sha256": {
     "overlong_prompts.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "prompt_audit.jsonl": "185f9a473e9f419e922dda340e95ce7d96ca1e53f84cf081861feb252d0f0f16",
-    "training_subset.jsonl": "82d7fd847492509944203c9e949544569f6bb27a3c58d687d7f05900a6aacccc"
+    "prompt_audit.jsonl": "74567d8f33dcb9503b18ab013274724aec042d7c29860dc97652fe00726fd5f0",
+    "training_subset.jsonl": "554c5524ebf50595433f257f45fbeefacb6158ab662d20df62f3e04ce176db92"
   },
   "model": {
     "key": "granite",

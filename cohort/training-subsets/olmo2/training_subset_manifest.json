@@ -1,15 +1,15 @@
 {
   "cohort": "boxed-numeric",
   "counts": {
-    "cohort_train": 5029,
+    "cohort_train": 5589,
     "overlong": 0,
-    "selected": 5029
+    "selected": 5589
   },
-  "data_manifest_sha256": "d282bd75c15f975947286e3d4e6b12a98c88951478a4bbd42af6d6576c4fc8b6",
+  "data_manifest_sha256": "23a69e2a61a8595e86749b16b01f9da72532585d05ea77b7f3ad66f1f1304448",
   "files_sha256": {
     "overlong_prompts.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "prompt_audit.jsonl": "95f60e8bb6c3630d9ce34401b1cd9e87c76a0246ce9ba7ad07aaae95739c794b",
-    "training_subset.jsonl": "f6003cde34b59e0993aab71f8c3f84b9ec06cbeeb97a687c099ed9db2fdc7357"
+    "prompt_audit.jsonl": "ab90df5aa9169348614e70fe207ed6b8961a7f8a53cc2d94c57893aebea2d80f",
+    "training_subset.jsonl": "b77179fd548c5d4412e167bb69e15b547dc9f09975c49f7eec754b238c5fcddb"
   },
   "model": {
     "key": "olmo2",

@@ -19,7 +19,7 @@ from post_train_math.models import (
 
 MAX_PROMPT_LENGTH = 2048
 MAX_COMPLETION_LENGTH = 2048
-FROZEN_TRAIN_ROWS = 5029
+FROZEN_TRAIN_ROWS = 5589
 CHECKPOINT_STEPS = 50
 
 
@@ -359,6 +359,7 @@ def build_config(
         logging_steps=1,
         save_strategy="steps",
         save_steps=CHECKPOINT_STEPS,
+        save_total_limit=None,
         save_only_model=False,
         restore_callback_states_from_checkpoint=True,
         ignore_data_skip=False,

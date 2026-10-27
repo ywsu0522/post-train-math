@@ -1,0 +1,223 @@
+{
+  "accuracy_aggregation": "unweighted fraction correct over the fixed 512 questions",
+  "data_manifest_sha256": "23a69e2a61a8595e86749b16b01f9da72532585d05ea77b7f3ad66f1f1304448",
+  "name": "fixed512",
+  "pool_size": 3686,
+  "problem_ids_sha256": "174d7a6241e33c11edf799b8dd5dbfa73b9e75e539516cdd41531532f04922d6",
+  "sample_size": 512,
+  "samples_sha256": "b707393f26a67d7064c7416b1f144922fd7b24ee35c698c88a075721ecd05299",
+  "sampling_rule": "proportional allocation over (type, level) using largest remainders; within each stratum rank SHA256(seed + NUL + problem_id); return selected rows in original eligible-test order",
+  "seed": 42,
+  "strata": [
+    {
+      "level": "Level 1",
+      "pool": 127,
+      "sample": 18,
+      "type": "Algebra"
+    },
+    {
+      "level": "Level 2",
+      "pool": 163,
+      "sample": 23,
+      "type": "Algebra"
+    },
+    {
+      "level": "Level 3",
+      "pool": 208,
+      "sample": 29,
+      "type": "Algebra"
+    },
+    {
+      "level": "Level 4",
+      "pool": 228,
+      "sample": 32,
+      "type": "Algebra"
+    },
+    {
+      "level": "Level 5",
+      "pool": 223,
+      "sample": 31,
+      "type": "Algebra"
+    },
+    {
+      "level": "Level 1",
+      "pool": 37,
+      "sample": 5,
+      "type": "Counting & Probability"
+    },
+    {
+      "level": "Level 2",
+      "pool": 87,
+      "sample": 12,
+      "type": "Counting & Probability"
+    },
+    {
+      "level": "Level 3",
+      "pool": 81,
+      "sample": 11,
+      "type": "Counting & Probability"
+    },
+    {
+      "level": "Level 4",
+      "pool": 95,
+      "sample": 13,
+      "type": "Counting & Probability"
+    },
+    {
+      "level": "Level 5",
+      "pool": 107,
+      "sample": 15,
+      "type": "Counting & Probability"
+    },
+    {
+      "level": "Level 1",
+      "pool": 31,
+      "sample": 4,
+      "type": "Geometry"
+    },
+    {
+      "level": "Level 2",
+      "pool": 51,
+      "sample": 7,
+      "type": "Geometry"
+    },
+    {
+      "level": "Level 3",
+      "pool": 61,
+      "sample": 8,
+      "type": "Geometry"
+    },
+    {
+      "level": "Level 4",
+      "pool": 69,
+      "sample": 10,
+      "type": "Geometry"
+    },
+    {
+      "level": "Level 5",
+      "pool": 75,
+      "sample": 10,
+      "type": "Geometry"
+    },
+    {
+      "level": "Level 1",
+      "pool": 31,
+      "sample": 4,
+      "type": "Intermediate Algebra"
+    },
+    {
+      "level": "Level 2",
+      "pool": 76,
+      "sample": 11,
+      "type": "Intermediate Algebra"
+    },
+    {
+      "level": "Level 3",
+      "pool": 135,
+      "sample": 19,
+      "type": "Intermediate Algebra"
+    },
+    {
+      "level": "Level 4",
+      "pool": 173,
+      "sample": 24,
+      "type": "Intermediate Algebra"
+    },
+    {
+      "level": "Level 5",
+      "pool": 194,
+      "sample": 27,
+      "type": "Intermediate Algebra"
+    },
+    {
+      "level": "Level 1",
+      "pool": 29,
+      "sample": 4,
+      "type": "Number Theory"
+    },
+    {
+      "level": "Level 2",
+      "pool": 80,
+      "sample": 11,
+      "type": "Number Theory"
+    },
+    {
+      "level": "Level 3",
+      "pool": 102,
+      "sample": 14,
+      "type": "Number Theory"
+    },
+    {
+      "level": "Level 4",
+      "pool": 123,
+      "sample": 17,
+      "type": "Number Theory"
+    },
+    {
+      "level": "Level 5",
+      "pool": 145,
+      "sample": 20,
+      "type": "Number Theory"
+    },
+    {
+      "level": "Level 1",
+      "pool": 78,
+      "sample": 11,
+      "type": "Prealgebra"
+    },
+    {
+      "level": "Level 2",
+      "pool": 159,
+      "sample": 22,
+      "type": "Prealgebra"
+    },
+    {
+      "level": "Level 3",
+      "pool": 191,
+      "sample": 27,
+      "type": "Prealgebra"
+    },
+    {
+      "level": "Level 4",
+      "pool": 140,
+      "sample": 19,
+      "type": "Prealgebra"
+    },
+    {
+      "level": "Level 5",
+      "pool": 143,
+      "sample": 20,
+      "type": "Prealgebra"
+    },
+    {
+      "level": "Level 1",
+      "pool": 34,
+      "sample": 5,
+      "type": "Precalculus"
+    },
+    {
+      "level": "Level 2",
+      "pool": 48,
+      "sample": 7,
+      "type": "Precalculus"
+    },
+    {
+      "level": "Level 3",
+      "pool": 56,
+      "sample": 8,
+      "type": "Precalculus"
+    },
+    {
+      "level": "Level 4",
+      "pool": 45,
+      "sample": 6,
+      "type": "Precalculus"
+    },
+    {
+      "level": "Level 5",
+      "pool": 61,
+      "sample": 8,
+      "type": "Precalculus"
+    }
+  ]
+}

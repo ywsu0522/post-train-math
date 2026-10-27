@@ -141,6 +141,37 @@ def assert_same_state(expected, actual):
         assert actual == expected
 
 
+def test_saved_checkpoint_reloads_for_inference_without_final_report(
+    tmp_path, tiny_trainer
+):
+    import torch
+    from peft import PeftModel
+
+    from post_train_math.evaluation import adapter_metadata
+    from post_train_math.models import MODELS
+
+    trained, _ = tiny_trainer(tmp_path / "trained", 2)
+    trained.train()
+    trained.model.eval()
+    inputs = {
+        "input_ids": torch.tensor([[3, 7]]),
+        "attention_mask": torch.ones((1, 2), dtype=torch.long),
+    }
+    with torch.inference_mode():
+        expected = trained.model(**inputs).logits.clone()
+    checkpoint = tmp_path / "trained/checkpoint-2"
+    assert not (checkpoint.parent / "train_report.json").exists()
+    metadata = adapter_metadata(checkpoint, MODELS["olmo2"], "data-hash")
+    assert metadata["rollout_iterations"] == 2
+    fresh, _ = tiny_trainer(tmp_path / "fresh", 2)
+    base = fresh.model.unload()
+    reloaded = PeftModel.from_pretrained(base, checkpoint, local_files_only=True)
+    reloaded.eval()
+    with torch.inference_mode():
+        actual = reloaded(**inputs).logits
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("stop_step", [2, 4])
 def test_full_checkpoint_restores_adamw_and_continues_identically(
     tmp_path, tiny_trainer, stop_step
