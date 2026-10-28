@@ -1,7 +1,7 @@
 [project]
 name = "post-train-math"
 version = "0.1.0"
-description = "Frozen MATH boxed-numeric cohort and pinned-checkpoint RLOO with LoRA."
+description = "Frozen MATH boxed-numeric cohort with explicit LoRA RLOO and GR-REINFORCE."
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [

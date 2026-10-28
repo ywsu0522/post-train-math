@@ -1,11 +1,12 @@
-"""Adapter, AdamW and RNG checkpoint I/O, independent of the RLOO algorithm."""
+"""Adapter, AdamW and RNG checkpoint I/O, shared by the explicit RL methods."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-ENGINE = "explicit-rloo-v1"
+ENGINE = "explicit-rl-v1"
+LEGACY_RLOO_ENGINE = "explicit-rloo-v1"
 
 
 def run_definition(spec, manifest_hash, config, lora):
@@ -27,6 +28,28 @@ def rng_filename(rank, world_size):
     return "rng_state.pth" if world_size == 1 else f"rng_state_{rank}.pth"
 
 
+def training_progress(state, training):
+    """Read independent counters; retain the known legacy one-update mapping."""
+    explicit = ("rollout_iterations" in state, "optimizer_steps" in state)
+    if any(explicit):
+        if not all(explicit):
+            raise ValueError("Training state must record both progress counters")
+        rollouts = state["rollout_iterations"]
+        updates = state["optimizer_steps"]
+        if type(rollouts) is not int or rollouts < 1:
+            raise ValueError("rollout_iterations must be a positive integer")
+        if type(updates) is not int or updates < 0:
+            raise ValueError("optimizer_steps must be a nonnegative integer")
+        if "global_step" in state and state["global_step"] != rollouts:
+            raise ValueError("Legacy global_step and rollout_iterations disagree")
+    else:
+        updates = state.get("global_step")
+        if type(updates) is not int or updates < 1:
+            raise ValueError("Adapter must record a positive integer global_step")
+        rollouts = updates if training.get("num_iterations") == 1 else None
+    return {"rollout_iterations": rollouts, "optimizer_steps": updates}
+
+
 def validate_checkpoint(path, definition, max_steps):
     path = Path(path)
     required = [
@@ -44,12 +67,24 @@ def validate_checkpoint(path, definition, max_steps):
     if missing:
         raise ValueError(f"Incomplete checkpoint: missing {', '.join(missing)}")
     saved = json.loads((path / "run_definition.json").read_text(encoding="utf-8"))
+    if saved.get("engine") == LEGACY_RLOO_ENGINE:
+        from post_train_math import rloo
+
+        saved["engine"] = ENGINE
+        saved["training"].setdefault("method", rloo.NAME)
+        saved["training"].setdefault("objective", dict(rloo.OBJECTIVE))
     if saved.get("engine") != ENGINE:
-        raise ValueError("This training loop requires an explicit-rloo-v1 checkpoint")
+        raise ValueError("This training loop requires an explicit RL checkpoint")
+    # Legacy RLOO has one update per rollout, so both warmup units coincide.
+    if saved.get("training", {}).get("num_iterations") == 1:
+        saved["training"].setdefault("warmup_steps_unit", "optimizer_steps")
     if saved != definition:
         raise ValueError("Checkpoint model, data, LoRA or training settings differ")
     state = json.loads((path / "trainer_state.json").read_text(encoding="utf-8"))
-    if not 0 < state["global_step"] < max_steps:
+    progress = training_progress(state, definition["training"])
+    if progress["rollout_iterations"] is None:
+        raise ValueError("Resume requires a known rollout iteration")
+    if not 0 < progress["rollout_iterations"] < max_steps:
         raise ValueError("max-steps must exceed the checkpoint global_step")
     return state
 
@@ -64,6 +99,7 @@ def save_checkpoint(
     step,
     history,
     *,
+    optimizer_steps,
     weights_only=False,
 ):
     import torch
@@ -76,7 +112,15 @@ def save_checkpoint(
         tokenizer.save_pretrained(path)
         for filename, value in (
             ("run_definition.json", definition),
-            ("trainer_state.json", {"global_step": step, "log_history": history}),
+            (
+                "trainer_state.json",
+                {
+                    "global_step": step,  # Legacy alias of rollout_iterations.
+                    "rollout_iterations": step,
+                    "optimizer_steps": optimizer_steps,
+                    "log_history": history,
+                },
+            ),
         ):
             (path / filename).write_text(
                 json.dumps(value, indent=2) + "\n", encoding="utf-8"
@@ -121,4 +165,9 @@ def load_checkpoint(path, model, optimizer, accelerator, definition, max_steps):
         torch.cuda.set_rng_state(rng["cuda"], accelerator.device)
     if accelerator.scaler is not None:
         accelerator.scaler.load_state_dict(rng["scaler"])
-    return state["global_step"], state["log_history"]
+    progress = training_progress(state, definition["training"])
+    return (
+        progress["rollout_iterations"],
+        progress["optimizer_steps"],
+        state["log_history"],
+    )

@@ -12,6 +12,7 @@ from post_train_math.answers import (
     extract_final_boxed_numeric,
     verify_boxed_numeric,
 )
+from post_train_math.checkpoints import training_progress
 
 METRIC_DEFINITIONS = {
     "accuracy": "exact rational equality using the last boxed marker; parse failures count as incorrect",
@@ -62,13 +63,16 @@ def adapter_metadata(adapter_dir: Path | None, spec, manifest_hash: str) -> dict
         state = json.loads(
             (adapter_dir / "trainer_state.json").read_text(encoding="utf-8")
         )
-        step = state["global_step"]
+        training = definition["training"]
+        progress = training_progress(state, training)
+        step = progress["rollout_iterations"]
+        if step is None:
+            step = state["global_step"]
         if (
             adapter_dir.name.startswith("checkpoint-")
             and adapter_dir.name != f"checkpoint-{step}"
         ):
             raise ValueError("Checkpoint directory and trainer global_step disagree")
-        training = definition["training"]
     else:
         report = json.loads(
             (adapter_dir.parent / "train_report.json").read_text(encoding="utf-8")
@@ -81,13 +85,11 @@ def adapter_metadata(adapter_dir: Path | None, spec, manifest_hash: str) -> dict
             or report.get("data_manifest_sha256") != manifest_hash
         ):
             raise ValueError("Adapter does not match the pinned model and data")
-        step = report["global_step"]
         training = report["training_config"]
-    if type(step) is not int or step < 1:
-        raise ValueError("Adapter must record a positive integer global_step")
+        progress = training_progress(report, training)
     result = {
-        "optimizer_steps": step,
-        "rollout_iterations": step if training.get("num_iterations") == 1 else None,
+        **progress,
+        "method": training.get("method", "rloo"),
         "adapter_weights_sha256": hashlib.sha256(weights.read_bytes()).hexdigest(),
     }
     group = training.get("num_generations")

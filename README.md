@@ -1,8 +1,18 @@
 # post-train-math
 
-Pinned Hendrycks MATH data, the frozen `boxed-numeric` cohort, and RLOO
-training with an explicit PyTorch + PEFT loop for two pinned checkpoints. Python 3.12 and uv are
+Pinned Hendrycks MATH data, the frozen `boxed-numeric` cohort, and RLOO / GR-REINFORCE
+training with a shared explicit PyTorch + PEFT loop for two pinned checkpoints. Python 3.12 and uv are
 required. Data preparation and tests run on CPU; evaluation and training require CUDA.
+
+The experiment studies how different RL methods change mathematical reasoning
+under fixed data, prompts, verifier rewards and evaluation settings. `hw4.pdf`
+is a reference for RL objectives and update mechanics only. Its model, task,
+cohort, prompts and reward design do not define this project's experiment.
+There is no hyperparameter search or best-model selection stage; retain the
+planned checkpoint evaluations to compare learning trajectories.
+GR-REINFORCE uses a fixed KL coefficient of 0.05; RLOO retains its coefficient
+of 0.01. Select the method with `train --method rloo` (default) or
+`train --method gr_reinforce`; both use the same data, prompts and verifier.
 
 ## Frozen data contract
 
@@ -74,6 +84,9 @@ uv run --locked post-train-math eval --model-key granite --output-dir runs/grani
 # 4. Train a LoRA adapter with RLOO.
 uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --prompts-per-update 8 --rollouts 4 --per-device-train-batch-size 1 --gradient-accumulation-steps 32 --max-steps 200
 
+# Train GR-REINFORCE with the same batch and rollout budget.
+uv run --locked post-train-math train --method gr_reinforce --model-key olmo2 --output-dir runs/olmo2-gr-reinforce --prompts-per-update 8 --rollouts 4 --per-device-train-batch-size 1 --gradient-accumulation-steps 32 --max-steps 200
+
 # Evaluate the trained adapter.
 uv run --locked post-train-math eval --model-key olmo2 --adapter-dir runs/olmo2-rloo/adapter --output-dir runs/olmo2-rloo-test
 ```
@@ -128,10 +141,13 @@ boxes are recorded separately in per-question `boxed_format`; the metrics above
 follow the existing last-box reward rule. Every prediction stores its problem ID,
 test-cohort index, completion, gold value, correctness, and formatting diagnostics.
 
-Training defaults to 200 optimizer steps and saves `checkpoint-50`,
-`checkpoint-100`, `checkpoint-150`, and `checkpoint-200`. In this RLOO recipe,
-`num_iterations=1` and the batch/accumulation contract ensure exactly one optimizer
-update per newly generated rollout batch, so these are also rollout iterations.
+Training defaults to 200 rollout iterations and saves `checkpoint-50`,
+`checkpoint-100`, `checkpoint-150`, and `checkpoint-200`, indexed by rollout
+iteration. One rollout iteration collects one new batch, with BG sampled
+completions. `rollout_iterations` and `optimizer_steps` are recorded independently
+in history, training reports, checkpoints and evaluation reports. This RLOO
+recipe makes exactly one optimizer step per new rollout batch, so the two
+counter values currently coincide; that equality is not a cross-method rule.
 Earlier checkpoints are retained. They contain LoRA adapters and must be loaded
 on top of the matching pinned base model.
 
@@ -189,18 +205,18 @@ This workflow currently supports greedy evaluation and individual series; it
 does not compute pass@K, confidence intervals, or aggregate training seeds.
 Use a distinct series name for each training run when plotting several runs.
 
-RLOO uses PyTorch + PEFT directly. Accelerate handles device placement, DDP,
+Both methods use PyTorch + PEFT directly. Accelerate handles device placement, DDP,
 autocast and AMP; it does not own the iteration loop. There is no RLOOTrainer
 subclass, sampler wrapper, or Trainer callback in the RLOO path.
 
-Read `rloo.py:train_loop` from top to bottom. Each iteration has three explicit
+Read `rl_core.py:train_loop` from top to bottom. Each iteration has three explicit
 stages, with a start and completion event printed immediately and appended to
 `iteration_log.jsonl`:
 
 | Stage | Function | Observable state |
 | --- | --- | --- |
 | 1.1 | `generate_rollouts` | Draw B prompts **with replacement**, repeat each G times, generate BG completions with the PEFT policy; log sampled indices and completion count |
-| 1.2 | `estimate_gradients` | Numeric verifier rewards, no-grad policy/reference log probabilities for KL shaping, leave-one-out advantages per prompt, then fresh grad-enabled policy forwards and `backward()` over microbatches |
+| 1.2 | `method.estimate_gradients` | Selected method computes rewards, advantages and objective, then calls the core accumulation tool; returns only when unscaled, audited LoRA `.grad` is ready |
 | 2 | `update_parameters` | Warmup LR, gradient clipping, `AdamW.step()`, then actual LoRA parameter differences before clearing gradients |
 
 The loop verifies that every trainable parameter is a LoRA A/B matrix in one
@@ -210,12 +226,12 @@ per-target gradient norms. Stage 2 records `updated`, `changed_lora_tensors`,
 `lora_parameter_delta_norm`, and per-target delta norms. A zero-advantage batch
 can legitimately have no parameter change; the log reports that fact.
 
-For extra prints or logging, edit `log_stage`, insert statements directly in
-`train_loop`, or inspect `rollouts`, `advantages`, `logps` and parameter `.grad`
+For extra prints or logging, edit `rl_core.log_stage`, insert statements directly
+in `rl_core.train_loop`, or inspect `rollouts`, `advantages`, `logps` and parameter `.grad`
 in the stage functions. Reward/advantage arrays and their mean, std, min and max
 are saved alongside the gradient diagnostics.
 
-`B` is the global number of prompt draws per optimizer update; `G >= 2`
+`B` is the global number of prompt draws per rollout iteration; `G >= 2`
 (`--rollouts`) is the number of answers per draw. Sequences per device are set
 by `--per-device-train-batch-size` (default 1). The explicit accumulation setting
 (default 32) must satisfy:
@@ -226,11 +242,11 @@ B * G = per_device_train_batch_size * world_size * gradient_accumulation_steps
 
 Each rank processes a contiguous slice of the global BG sequences. Rewards are
 gathered in prompt-major order before computing the G-way baseline, including
-when siblings span ranks. Each microbatch loss is a sum divided by the local
-rollout count; DDP averages ranks, giving the global BG average. Accumulation
+when siblings span ranks. Each microbatch policy loss is a sum divided by the
+local rollout count; DDP averages ranks, giving the global BG policy average. Accumulation
 is explicit in stage 1.2; Accelerate's accumulation factor stays at one.
 
-The objective is the on-policy REINFORCE estimator:
+The RLOO objective is the on-policy REINFORCE estimator:
 
 ```text
 shaped_reward = verifier_reward - beta * (policy_log_prob - reference_log_prob)
@@ -248,11 +264,52 @@ attention `q_proj`, `k_proj`, `v_proj`, `o_proj` and MLP `gate_proj`, `up_proj`,
 `down_proj`. The reference is the pinned base with adapters disabled; KL beta
 is 0.01. Sampling uses temperature 1, top-p 1 and top-k 0.
 
+The two method modules have the same interface:
+
+```python
+rollouts = generate_rollouts(...)
+gradient_stats = method.estimate_gradients(context, rollouts)
+update_stats = update_parameters(...)
+```
+
+`training.py` selects the module and initializes model/LoRA/AdamW/Accelerator.
+`rl_core.py` imports neither the method modules nor the training entry point.
+The core owns token log-probabilities/masks, explicit microbatch accumulation,
+DDP synchronization, AMP unscaling, gradient audits, clipping and optimizer steps.
+Methods own their estimator and call the common `accumulate_gradients` tool;
+they never step the optimizer. No duplicated method-specific training loop is used.
+
+| Objective choice | RLOO | GR-REINFORCE |
+| --- | --- | --- |
+| Advantage | Leave-one-out baseline of KL-shaped rewards | Raw verifier rewards, group population std + 1e-6, then clip to [-5, 5]; no second normalization |
+| Policy term | Completion-token log-probability sum, then completion mean | Completion-token log-probability mean, then completion mean |
+| KL | Detached sequence log-ratio in the reward | Independent differentiable `expm1(delta) - delta` loss, delta = ref minus policy log-probability clamped to [-20, 20] |
+| KL coefficient | 0.01 | 0.05 |
+| Updates per fresh rollout batch | 1 | 1 |
+
+GR-REINFORCE normalizes KL by the total valid completion-token count across the
+whole rollout and all ranks. DDP's rank averaging is compensated explicitly.
+This keeps the objective invariant to microbatch/rank partitioning with unequal
+completion lengths. It differs from averaging each minibatch's token mean with
+equal weight, as in the homework starter's accumulation instructions. The
+policy term still weights completions equally. Raw-policy scoring requires
+sampling temperature=1, top-p=1 and top-k=0; other values are rejected rather
+than silently changing the estimator's sampling distribution.
+
+Groups with zero advantages are retained without resampling or filtering.
+Completions that reach the token limit without EOS remain eligible for the same
+verifier and policy loss; the first EOS is included when present. Non-finite
+losses or gradients and AMP-skipped optimizer steps abort training immediately.
+A successful optimizer step is counted even when its parameter delta is zero.
+
 The optimizer is `torch.optim.AdamW`, with betas `(0.9, 0.95)`, epsilon `1e-8`,
-weight decay `0`, and gradient norm clipping at `0.5`. For one-based iteration
-`t`, stage 2 explicitly sets `lr = target_lr * min(t / 20, 1)`: the first update
+weight decay `0`, and gradient norm clipping at `0.5`. For one-based optimizer
+step `u`, stage 2 explicitly sets `lr = target_lr * min(u / 20, 1)`: the first update
 uses target/20, update 20 reaches the target (default `1e-5`), and later updates
 keep it constant. No separate scheduler object or scheduler checkpoint is needed.
+Warmup uses the restored optimizer-step counter, independently of rollout
+iterations; a future method with two updates per rollout reaches the target LR
+on optimizer step 20, after ten rollout iterations.
 
 Complete `checkpoint-N/` directories are saved every 50 iterations and at the
 end. They contain the adapter/tokenizer, `optimizer.pt`, `trainer_state.json`,
@@ -260,8 +317,14 @@ end. They contain the adapter/tokenizer, `optimizer.pt`, `trainer_state.json`,
 state is included with that rank's RNG state. The sampler uses a separate local
 generator seeded with `seed + iteration`, so prompt draws need no epoch cursor.
 Checkpoints are taken only after a full rollout/update iteration.
+`global_step` remains a legacy alias of the rollout-iteration counter in new
+state files; new consumers use the two explicit counters. Older single-update
+RLOO checkpoints remain readable via their known one-update-per-rollout mapping.
 
-The new checkpoint engine is `explicit-rloo-v1`. Old TRL checkpoints remain
+The shared checkpoint engine is `explicit-rl-v1`. Its run definition records the
+method, beta and complete objective settings. Previous `explicit-rloo-v1`
+checkpoints are normalized to the equivalent RLOO settings for resume; changing
+methods or objectives is rejected. Old TRL checkpoints remain
 usable for inference/evaluation but are rejected for resume by this loop: the
 sampling rule, LR indexing and checkpoint layout have changed. This avoids
 silently treating a different training recipe as an exact continuation.
@@ -272,8 +335,10 @@ Resume a full checkpoint, using the same training settings:
 uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-rloo --resume-from-checkpoint runs/olmo2-rloo/checkpoint-100 --per-device-train-batch-size 1 --gradient-accumulation-steps 32 --max-steps 200
 ```
 
-`--max-steps 200` is the **total target**, so this continues from step 100 to
-step 200. It may be extended because the fixed warmup followed by constant LR
+`--max-steps 200` is the **total rollout-iteration target**, so this continues
+from rollout iteration 100 to 200. Resume restores the adapter, AdamW moments,
+RNG state and both progress counters to continue the same interrupted experiment.
+It may be extended because the fixed warmup followed by constant LR
 does not depend on the original horizon. Incompatible settings and incomplete
 checkpoints are rejected before writing run artifacts or loading model weights. `adapter/` is
 an inference export; it does not contain AdamW moments and cannot be used for
@@ -292,7 +357,7 @@ For each model, it tokenizes every full conversation with that model's actual
 chat template, including the fixed system prompt, role/BOS tokens, and assistant
 generation prefix. `tokenize=True`, `add_generation_prompt=True`,
 `truncation=False`, and `padding=False` are explicit. Only problems with
-`prompt_tokens <= 2048` enter RLOO. RLOO also disables truncation and uses the
+`prompt_tokens <= 2048` enter training. Both methods disable truncation and uses the
 same conversation and template settings. The underlying cohort and all split
 memberships remain fixed; the training subset is specific to each model.
 The completion budget remains 2,048 tokens.
@@ -351,7 +416,9 @@ post-train-math/
 │   ├── answers.py
 │   ├── data.py
 │   ├── models.py
-│   ├── rloo.py  # visible iteration loop and its three stages
+│   ├── rl_core.py  # shared visible loop, rollouts, backward/DDP/AMP and updates
+│   ├── rloo.py  # RLOO estimator and objective
+│   ├── gr_reinforce.py  # group-normalized REINFORCE estimator and KL objective
 │   ├── training.py  # settings, model/optimizer setup, CLI entry
 │   ├── training_data.py  # native-chat prompt preparation and audits
 │   ├── checkpoints.py  # adapter/AdamW/RNG save and restore
@@ -381,8 +448,8 @@ uv build
 Tests cover the grammar, strict gold-box requirement, reward, original train/test
 membership and order, source/file integrity, model pins, explicit batch settings, native
 chat token counts, the 2048/2049-token boundary, saved subset hashes, CLI workflows, and a
-small real OLMo2/Granite PEFT CPU training steps, analytical vs microbatch
-gradients, frozen-base checks, actual LoRA updates, warmup/resume, adapter export,
+small real OLMo2/Granite PEFT CPU training steps for both methods, analytical vs
+microbatch gradients, unequal-length global KL/rank normalization, frozen-base checks, actual LoRA updates, warmup/resume, adapter export,
 fresh-model checkpoint inference reload, fixed test selection, and offline plotting. They do not run the
 full GPU experiment or claim any model accuracy. Historical baseline artifacts
 and local experiments have been removed.

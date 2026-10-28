@@ -56,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
                 )
         else:
             command.add_argument(
+                "--method", choices=("rloo", "gr_reinforce"), default="rloo"
+            )
+            command.add_argument(
                 "--prompts-per-update", type=int, default=8, help="Global B"
             )
             command.add_argument(
@@ -78,7 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="Save the model-specific training subset on CPU without training",
             )
-            command.add_argument("--max-steps", type=int, default=200)
+            command.add_argument(
+                "--max-steps", type=int, default=200, help="Total rollout iterations"
+            )
             command.add_argument("--learning-rate", type=float, default=1e-5)
             command.add_argument(
                 "--resume-from-checkpoint",

@@ -1,4 +1,4 @@
-"""CLI setup and explicit training settings; the iteration loop lives in rloo.py."""
+"""CLI setup and explicit training settings; the shared iteration loop lives in rl_core.py."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from pathlib import Path
 
 from post_train_math.data import load_cohort, validate_processed_manifest
 from post_train_math.models import MODELS, load_tokenizer, validate_model_source
+from post_train_math.rl_core import LORA_TARGET_MODULES, train_loop, validate_batch
 from post_train_math.training_data import (
     FROZEN_TRAIN_ROWS,
     MAX_COMPLETION_LENGTH,
@@ -16,20 +17,23 @@ from post_train_math.training_data import (
     prepare_training_subset,
 )
 
-LORA_TARGET_MODULES = (
-    "q_proj",
-    "k_proj",
-    "v_proj",
-    "o_proj",
-    "gate_proj",
-    "up_proj",
-    "down_proj",
-)
+
+def get_method(name):
+    if name == "rloo":
+        from post_train_math import rloo
+
+        return rloo
+    if name == "gr_reinforce":
+        from post_train_math import gr_reinforce
+
+        return gr_reinforce
+    raise ValueError(f"Unknown RL method: {name}")
 
 
 @dataclass
 class TrainConfig:
     output_dir: Path
+    method: str = "rloo"
     prompts_per_update: int = 8
     num_generations: int = 4
     per_device_train_batch_size: int = 1
@@ -44,7 +48,7 @@ class TrainConfig:
     adam_epsilon: float = 1e-8
     weight_decay: float = 0.0
     max_grad_norm: float = 0.5
-    beta: float = 0.01
+    beta: float | None = None
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
@@ -53,6 +57,11 @@ class TrainConfig:
     gradient_checkpointing: bool = True
     mixed_precision: str = "no"
     use_cpu: bool = False
+
+    def __post_init__(self):
+        method = get_method(self.method)
+        if self.beta is None:
+            self.beta = method.DEFAULT_BETA
 
     @property
     def generation_batch_size(self):
@@ -66,33 +75,9 @@ class TrainConfig:
             "num_iterations": 1,
             "sampling": "with replacement; torch seed + iteration",
             "lr_scheduler_type": "linear warmup then constant",
+            "warmup_steps_unit": "optimizer_steps",
+            "objective": dict(get_method(self.method).OBJECTIVE),
         }
-
-
-def validate_batch(
-    prompts,
-    rollouts,
-    per_device_train_batch_size,
-    world_size,
-    gradient_accumulation_steps,
-):
-    if (
-        min(
-            prompts,
-            per_device_train_batch_size,
-            world_size,
-            gradient_accumulation_steps,
-        )
-        < 1
-        or rollouts < 2
-    ):
-        raise ValueError(
-            "B, microbatch, world size and accumulation must be positive; G >= 2"
-        )
-    if prompts * rollouts != (
-        per_device_train_batch_size * world_size * gradient_accumulation_steps
-    ):
-        raise ValueError("B * G must equal microbatch * world-size * accumulation")
 
 
 def build_config(
@@ -106,6 +91,7 @@ def build_config(
     max_steps,
     learning_rate,
     use_cpu=False,
+    method="rloo",
 ):
     import torch
 
@@ -123,6 +109,7 @@ def build_config(
     )
     return TrainConfig(
         output_dir=Path(output_dir),
+        method=method,
         prompts_per_update=prompts,
         num_generations=rollouts,
         per_device_train_batch_size=per_device_train_batch_size,
@@ -182,12 +169,12 @@ def run_train(args):
     from transformers import AutoModelForCausalLM, set_seed
 
     from post_train_math.checkpoints import run_definition, validate_checkpoint
-    from post_train_math.rloo import train_loop
 
     if not torch.cuda.is_available():
-        raise RuntimeError("RLOO training requires CUDA")
+        raise RuntimeError("RL training requires CUDA")
     config = build_config(
         args.output_dir,
+        method=args.method,
         prompts=args.prompts_per_update,
         rollouts=args.rollouts,
         per_device_train_batch_size=args.per_device_train_batch_size,
@@ -260,6 +247,7 @@ def run_train(args):
         config,
         accelerator,
         definition,
+        method=get_method(config.method),
         resume=resume,
     )
     if accelerator.is_main_process:
@@ -271,6 +259,8 @@ def run_train(args):
             "training_subset": subset,
             "training_config": config.to_dict(),
             "global_step": config.max_steps,
+            "rollout_iterations": config.max_steps,
+            "optimizer_steps": history[-1]["optimizer_steps"],
             "resume_from_checkpoint": str(resume) if resume else None,
             "log_history": history,
         }

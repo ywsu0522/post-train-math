@@ -54,3 +54,27 @@ def test_checkpoint_inference_metadata_does_not_require_final_report(tmp_path):
     (checkpoint / "trainer_state.json").write_text(json.dumps({"global_step": 100}))
     with pytest.raises(ValueError, match="disagree"):
         adapter_metadata(checkpoint, spec, "data-hash")
+
+
+def test_explicit_rollout_and_optimizer_counters_can_differ(tmp_path):
+    checkpoint = tmp_path / "checkpoint-50"
+    checkpoint.mkdir()
+    (checkpoint / "adapter_config.json").write_text("{}")
+    (checkpoint / "adapter_model.safetensors").write_bytes(b"weights")
+    spec = MODELS["olmo2"]
+    definition = {
+        "model": {"repo_id": spec.repo_id, "revision": spec.revision},
+        "data_manifest_sha256": "data-hash",
+        "training": {"num_iterations": 2},
+    }
+    (checkpoint / "run_definition.json").write_text(json.dumps(definition))
+    state = {"global_step": 50, "rollout_iterations": 50, "optimizer_steps": 100}
+    state_path = checkpoint / "trainer_state.json"
+    state_path.write_text(json.dumps(state))
+    metadata = adapter_metadata(checkpoint, spec, "data-hash")
+    assert metadata["rollout_iterations"] == 50
+    assert metadata["optimizer_steps"] == 100
+    del state["optimizer_steps"]
+    state_path.write_text(json.dumps(state))
+    with pytest.raises(ValueError, match="both progress counters"):
+        adapter_metadata(checkpoint, spec, "data-hash")

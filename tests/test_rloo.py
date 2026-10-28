@@ -3,13 +3,14 @@ from pathlib import Path
 
 import pytest
 
+from post_train_math import rloo
 from post_train_math.answers import numeric_reward
-from post_train_math.training import validate_batch
+from post_train_math.training import get_method, validate_batch
 from post_train_math.training_data import prepare_training_subset
 
 
 def fixed_rollouts(records):
-    from post_train_math.rloo import Rollouts
+    from post_train_math.rl_core import Rollouts
 
     return Rollouts(
         [records[0], records[0], records[1], records[1]],
@@ -21,15 +22,18 @@ def fixed_rollouts(records):
 
 
 @pytest.mark.parametrize("model_key", ["olmo2", "granite"])
+@pytest.mark.parametrize("method_name", ["rloo", "gr_reinforce"])
 def test_three_stages_verify_reward_gradients_and_real_lora_updates(
-    tmp_path, tiny_training, monkeypatch, model_key
+    tmp_path, tiny_training, monkeypatch, model_key, method_name
 ):
     import torch
 
-    from post_train_math.rloo import train_loop
+    from post_train_math.rl_core import train_loop
     from post_train_math.training import LORA_TARGET_MODULES
 
-    args = tiny_training(tmp_path / model_key, max_steps=2, model_key=model_key)
+    args = tiny_training(
+        tmp_path / model_key, max_steps=2, model_key=model_key, method=method_name
+    )
     model, _tokenizer, _records, _optimizer, config, accelerator, _definition = args
     frozen = {
         n: p.detach().clone()
@@ -43,7 +47,7 @@ def test_three_stages_verify_reward_gradients_and_real_lora_updates(
         return torch.cat([inputs["input_ids"], answers], dim=1)
 
     monkeypatch.setattr(accelerator.unwrap_model(model), "generate", generate)
-    history = train_loop(*args)
+    history = train_loop(*args, method=get_method(method_name))
     assert len(history) == 2 and all(row["updated"] for row in history)
     for row in history:
         assert row["changed_lora_tensors"] > 0
@@ -81,8 +85,8 @@ def test_microbatch_estimator_matches_direct_full_batch_autograd(
 ):
     import torch
 
-    from post_train_math.rloo import (
-        estimate_gradients,
+    from post_train_math.rl_core import (
+        GradientContext,
         sequence_log_probs,
         verify_lora_targets,
     )
@@ -106,7 +110,9 @@ def test_microbatch_estimator_matches_direct_full_batch_autograd(
     ).flatten()
     (-(expected_advantage * pi).mean()).backward()
     expected = {n: p.grad.clone() for n, p in trainable.items()}
-    stats = estimate_gradients(model, tok, rollouts, opt, cfg, acc, 1, trainable)
+    stats = rloo.estimate_gradients(
+        GradientContext(model, tok, opt, cfg, acc, 1, trainable), rollouts
+    )
     assert any(p.norm() > 0 for p in expected.values())
     for name, p in trainable.items():
         torch.testing.assert_close(p.grad, expected[name], rtol=2e-4, atol=2e-6)
@@ -118,7 +124,7 @@ def test_log_prob_sums_exclude_prompts_and_padding_but_include_eos(
 ):
     import torch
 
-    from post_train_math.rloo import sequence_log_probs
+    from post_train_math.rl_core import sequence_log_probs
 
     model, tok, records, _, _, acc, _ = tiny_training(tmp_path)
     rollouts = fixed_rollouts(records)
@@ -136,7 +142,7 @@ def test_log_prob_sums_exclude_prompts_and_padding_but_include_eos(
 def test_sampling_is_with_replacement_and_groups_remain_aligned(
     tmp_path, tiny_training
 ):
-    from post_train_math.rloo import generate_rollouts
+    from post_train_math.rl_core import generate_rollouts
 
     model, tok, records, _, cfg, acc, _ = tiny_training(tmp_path)
     cfg.prompts_per_update = 8  # More draws than rows guarantees repeated prompts.
@@ -157,7 +163,8 @@ def test_loo_is_group_local_and_zero_signal_is_reported_honestly(
 ):
     import torch
 
-    from post_train_math.rloo import leave_one_out_advantages, train_loop
+    from post_train_math.rl_core import train_loop
+    from post_train_math.rloo import leave_one_out_advantages
 
     rewards = torch.tensor([1.0, 0.0, 0.0, 0.0, 7.0, 7.0, 7.0, 7.0], requires_grad=True)
     advantages = leave_one_out_advantages(rewards, 4)
@@ -168,7 +175,7 @@ def test_loo_is_group_local_and_zero_signal_is_reported_honestly(
     args = tiny_training(tmp_path, max_steps=1)
     args[4].beta = 0
     history = train_loop(
-        *args, reward_fn=lambda completions, **_: [0.0] * len(completions)
+        *args, method=rloo, reward_fn=lambda completions, **_: [0.0] * len(completions)
     )
     assert not history[0]["updated"]
     assert history[0]["lora_parameter_delta_norm"] == 0
@@ -177,7 +184,7 @@ def test_loo_is_group_local_and_zero_signal_is_reported_honestly(
 def test_warmup_then_constant_lr_is_used_by_actual_adamw_steps(tmp_path, tiny_training):
     import torch
 
-    from post_train_math.rloo import update_parameters, verify_lora_targets
+    from post_train_math.rl_core import update_parameters, verify_lora_targets
 
     model, _, _, opt, cfg, acc, _ = tiny_training(tmp_path)
     trainable = verify_lora_targets(model)
@@ -194,12 +201,31 @@ def test_warmup_then_constant_lr_is_used_by_actual_adamw_steps(tmp_path, tiny_tr
 
 
 def test_lora_audit_rejects_unfrozen_output_head(tmp_path, tiny_training):
-    from post_train_math.rloo import verify_lora_targets
+    from post_train_math.rl_core import verify_lora_targets
 
     model = tiny_training(tmp_path)[0]
     model.get_output_embeddings().weight.requires_grad_(True)
     with pytest.raises(ValueError, match="Non-LoRA trainable parameter"):
         verify_lora_targets(model)
+
+
+def test_amp_skipped_step_aborts_instead_of_reporting_success():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    import torch
+
+    from post_train_math.rl_core import update_parameters
+
+    parameter = torch.nn.Parameter(torch.ones(1))
+    parameter.grad = torch.ones_like(parameter)
+    optimizer = SimpleNamespace(param_groups=[{}], step=Mock(), zero_grad=Mock())
+    config = SimpleNamespace(learning_rate=1e-5, warmup_steps=20, max_grad_norm=0.5)
+    accelerator = SimpleNamespace(optimizer_step_was_skipped=True)
+    with pytest.raises(RuntimeError, match="aborted on overflow"):
+        update_parameters(optimizer, config, accelerator, 1, {"lora": parameter})
+    optimizer.step.assert_called_once()
+    optimizer.zero_grad.assert_not_called()
 
 
 def test_reward_supports_trl_text_and_conversations():

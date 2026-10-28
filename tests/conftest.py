@@ -29,7 +29,7 @@ def tiny_training(monkeypatch):
     threads = torch.get_num_threads()
     torch.set_num_threads(1)
 
-    def make(output, max_steps=3, model_key="olmo2", microbatch=2):
+    def make(output, max_steps=3, model_key="olmo2", microbatch=2, method="rloo"):
         set_seed(42)
         backend = Tokenizer(
             WordLevel(
@@ -67,6 +67,7 @@ def tiny_training(monkeypatch):
             max_steps=max_steps,
             learning_rate=1e-3,
             use_cpu=True,
+            method=method,
         )
         config.max_completion_length = 3
         config.save_steps = 2
