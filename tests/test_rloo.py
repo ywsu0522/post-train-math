@@ -4,7 +4,202 @@ from pathlib import Path
 import pytest
 
 from post_train_math.answers import numeric_reward
-from post_train_math.rloo import build_config, prepare_training_subset, validate_batch
+from post_train_math.training import validate_batch
+from post_train_math.training_data import prepare_training_subset
+
+
+def fixed_rollouts(records):
+    from post_train_math.rloo import Rollouts
+
+    return Rollouts(
+        [records[0], records[0], records[1], records[1]],
+        [[3], [3], [4, 3], [4, 3]],
+        [[6, 1], [7, 1], [6, 6, 1], [7, 7, 1]],
+        [r"\boxed{1}", r"\boxed{2}", r"\boxed{1}", r"\boxed{2}"],
+        [0, 1],
+    )
+
+
+@pytest.mark.parametrize("model_key", ["olmo2", "granite"])
+def test_three_stages_verify_reward_gradients_and_real_lora_updates(
+    tmp_path, tiny_training, monkeypatch, model_key
+):
+    import torch
+
+    from post_train_math.rloo import train_loop
+    from post_train_math.training import LORA_TARGET_MODULES
+
+    args = tiny_training(tmp_path / model_key, max_steps=2, model_key=model_key)
+    model, _tokenizer, _records, _optimizer, config, accelerator, _definition = args
+    frozen = {
+        n: p.detach().clone()
+        for n, p in model.named_parameters()
+        if not p.requires_grad
+    }
+
+    def generate(**inputs):
+        # Known correct/incorrect answers exercise the actual numeric verifier.
+        answers = torch.tensor([[6, 1], [7, 1]], device=inputs["input_ids"].device)
+        return torch.cat([inputs["input_ids"], answers], dim=1)
+
+    monkeypatch.setattr(accelerator.unwrap_model(model), "generate", generate)
+    history = train_loop(*args)
+    assert len(history) == 2 and all(row["updated"] for row in history)
+    for row in history:
+        assert row["changed_lora_tensors"] > 0
+        assert row["lora_parameter_delta_norm"] > 0
+        assert row["gradient_norm_after_clipping"] <= config.max_grad_norm + 1e-6
+        assert row["base_gradient_tensors"] == 0
+        assert row["lora_gradient_tensors"] == 14
+        assert set(row["lora_gradient_norm_by_target"]) == set(LORA_TARGET_MODULES)
+        assert row["policy_log_probs_require_grad"]
+        assert not row["reference_log_probs_require_grad"]
+    for name, parameter in model.named_parameters():
+        if name in frozen:
+            torch.testing.assert_close(parameter, frozen[name], rtol=0, atol=0)
+    events = [
+        json.loads(line)
+        for line in (config.output_dir / "iteration_log.jsonl").read_text().splitlines()
+    ]
+    for iteration in (1, 2):
+        assert [
+            event["stage"]
+            for event in events
+            if event["iteration"] == iteration and event.get("status") == "complete"
+        ] == ["1.1", "1.2", "2"]
+        advantages = next(
+            event
+            for event in events
+            if event["iteration"] == iteration and event.get("status") == "advantages"
+        )
+        assert advantages["verifier_rewards"] == [1, 0, 1, 0]
+    assert events[2]["completions"] == config.generation_batch_size
+
+
+def test_microbatch_estimator_matches_direct_full_batch_autograd(
+    tmp_path, tiny_training
+):
+    import torch
+
+    from post_train_math.rloo import (
+        estimate_gradients,
+        sequence_log_probs,
+        verify_lora_targets,
+    )
+
+    model, tok, records, opt, cfg, acc, _ = tiny_training(tmp_path, microbatch=1)
+    rollouts = fixed_rollouts(records)
+    trainable = verify_lora_targets(model)
+    # Nonzero adapters ensure reference and current policy differ for the KL reward.
+    with torch.no_grad():
+        for name, p in trainable.items():
+            if ".lora_B." in name:
+                p.normal_(std=0.05)
+    model.eval()
+    with torch.no_grad(), acc.unwrap_model(model).disable_adapter():
+        ref = sequence_log_probs(model, tok, rollouts, 0, 4, acc.device)
+    pi = sequence_log_probs(model, tok, rollouts, 0, 4, acc.device)
+    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0]) - cfg.beta * (pi.detach() - ref)
+    # For G=2, each sibling is exactly the other's leave-one-out baseline.
+    expected_advantage = (
+        rewards.reshape(2, 2) - rewards.reshape(2, 2).flip(1)
+    ).flatten()
+    (-(expected_advantage * pi).mean()).backward()
+    expected = {n: p.grad.clone() for n, p in trainable.items()}
+    stats = estimate_gradients(model, tok, rollouts, opt, cfg, acc, 1, trainable)
+    assert any(p.norm() > 0 for p in expected.values())
+    for name, p in trainable.items():
+        torch.testing.assert_close(p.grad, expected[name], rtol=2e-4, atol=2e-6)
+    assert not stats["reference_log_probs_require_grad"]
+
+
+def test_log_prob_sums_exclude_prompts_and_padding_but_include_eos(
+    tmp_path, tiny_training
+):
+    import torch
+
+    from post_train_math.rloo import sequence_log_probs
+
+    model, tok, records, _, _, acc, _ = tiny_training(tmp_path)
+    rollouts = fixed_rollouts(records)
+    model.eval()
+    actual = sequence_log_probs(model, tok, rollouts, 0, 4, acc.device)
+    for i, (prompt, answer) in enumerate(
+        zip(rollouts.prompt_ids, rollouts.completion_ids, strict=True)
+    ):
+        ids = torch.tensor([prompt + answer])
+        logits = model(input_ids=ids).logits[0, len(prompt) - 1 : -1].float()
+        expected = logits.log_softmax(-1).gather(1, torch.tensor(answer)[:, None]).sum()
+        torch.testing.assert_close(actual[i], expected, rtol=1e-6, atol=1e-6)
+
+
+def test_sampling_is_with_replacement_and_groups_remain_aligned(
+    tmp_path, tiny_training
+):
+    from post_train_math.rloo import generate_rollouts
+
+    model, tok, records, _, cfg, acc, _ = tiny_training(tmp_path)
+    cfg.prompts_per_update = 8  # More draws than rows guarantees repeated prompts.
+    cfg.gradient_accumulation_steps = 8
+    batch = generate_rollouts(model, tok, records, cfg, acc, 1)
+    assert len(batch.sampled_indices) == 8
+    assert len(set(batch.sampled_indices)) < 8
+    assert len(batch.completion_ids) == len(batch.texts) == 16
+    assert batch.records == [
+        records[i] for i in batch.sampled_indices for _ in range(2)
+    ]
+    repeated = generate_rollouts(model, tok, records, cfg, acc, 1)
+    assert repeated.sampled_indices == batch.sampled_indices
+
+
+def test_loo_is_group_local_and_zero_signal_is_reported_honestly(
+    tmp_path, tiny_training
+):
+    import torch
+
+    from post_train_math.rloo import leave_one_out_advantages, train_loop
+
+    rewards = torch.tensor([1.0, 0.0, 0.0, 0.0, 7.0, 7.0, 7.0, 7.0], requires_grad=True)
+    advantages = leave_one_out_advantages(rewards, 4)
+    torch.testing.assert_close(
+        advantages, torch.tensor([1.0, -1 / 3, -1 / 3, -1 / 3, 0, 0, 0, 0])
+    )
+    assert not advantages.requires_grad
+    args = tiny_training(tmp_path, max_steps=1)
+    args[4].beta = 0
+    history = train_loop(
+        *args, reward_fn=lambda completions, **_: [0.0] * len(completions)
+    )
+    assert not history[0]["updated"]
+    assert history[0]["lora_parameter_delta_norm"] == 0
+
+
+def test_warmup_then_constant_lr_is_used_by_actual_adamw_steps(tmp_path, tiny_training):
+    import torch
+
+    from post_train_math.rloo import update_parameters, verify_lora_targets
+
+    model, _, _, opt, cfg, acc, _ = tiny_training(tmp_path)
+    trainable = verify_lora_targets(model)
+    rates = []
+    for iteration in range(1, 26):
+        for p in trainable.values():
+            p.grad = torch.ones_like(p)
+        result = update_parameters(opt, cfg, acc, iteration, trainable)
+        assert result["updated"]
+        rates.append(result["learning_rate"])
+    assert rates[0] == pytest.approx(cfg.learning_rate / 20)
+    assert rates[19:] == [cfg.learning_rate] * 6
+    assert all(state["step"] == 25 for state in opt.state_dict()["state"].values())
+
+
+def test_lora_audit_rejects_unfrozen_output_head(tmp_path, tiny_training):
+    from post_train_math.rloo import verify_lora_targets
+
+    model = tiny_training(tmp_path)[0]
+    model.get_output_embeddings().weight.requires_grad_(True)
+    with pytest.raises(ValueError, match="Non-LoRA trainable parameter"):
+        verify_lora_targets(model)
 
 
 def test_reward_supports_trl_text_and_conversations():
@@ -40,161 +235,6 @@ def test_b_counts_prompts_and_r_counts_rollouts(world_size, expected):
 def test_invalid_batches_are_rejected(batch):
     with pytest.raises(ValueError):
         validate_batch(*batch)
-
-
-def test_real_trl_peft_cpu_step_and_adapter_save(tmp_path, monkeypatch):
-    """Exercise the locked TRL API locally without network or model weights."""
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setenv("HF_DATASETS_OFFLINE", "1")
-    monkeypatch.setenv("TRL_HUB_TELEMETRY", "0")
-    import pandas as pd
-    import torch
-    from datasets import Dataset
-    from peft import LoraConfig
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import WhitespaceSplit
-    from transformers import (
-        GPT2Config,
-        GPT2LMHeadModel,
-        PreTrainedTokenizerFast,
-        set_seed,
-    )
-    from trl import RLOOTrainer
-
-    set_seed(42)
-    backend = Tokenizer(
-        WordLevel(
-            {
-                "[PAD]": 0,
-                "[EOS]": 1,
-                "[UNK]": 2,
-                "Problem": 3,
-                "one": 4,
-                "two": 5,
-                r"\boxed{1}": 6,
-                r"\boxed{2}": 7,
-            },
-            unk_token="[UNK]",
-        )
-    )
-    backend.pre_tokenizer = WhitespaceSplit()
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=backend,
-        pad_token="[PAD]",
-        eos_token="[EOS]",
-        unk_token="[UNK]",
-        padding_side="left",
-        truncation_side="left",
-    )
-    tokenizer.chat_template = (
-        "{% for message in messages %}{{ message['content'] }} {% endfor %}"
-    )
-    model = GPT2LMHeadModel(
-        GPT2Config(
-            vocab_size=8,
-            n_layer=1,
-            n_head=1,
-            n_embd=8,
-            n_positions=32,
-            bos_token_id=1,
-            eos_token_id=1,
-            pad_token_id=0,
-            use_cache=False,
-        )
-    )
-    config = build_config(
-        tmp_path,
-        prompts=2,
-        rollouts=2,
-        per_device_train_batch_size=1,
-        world_size=1,
-        gradient_accumulation_steps=4,
-        max_steps=1,
-        learning_rate=1e-3,
-        use_cpu=True,
-    )
-    assert config.num_generations == 2
-    assert config.generation_batch_size == 4
-    assert config.gradient_accumulation_steps == 4
-    assert config.max_completion_length == 2048
-    assert config.chat_template_kwargs == {"truncation": False}
-    assert config.num_iterations == 1 and not config.sync_ref_model
-    assert config.lr_scheduler_type == "constant"
-    assert config.optim == "adamw_torch"
-    assert config.warmup_steps == 0
-    assert config.save_strategy == "steps" and config.save_steps == 50
-    assert config.save_total_limit is None
-    assert not config.save_only_model
-    config.max_completion_length = 4
-    config.disable_tqdm = True
-    from dataclasses import replace
-
-    from post_train_math.models import MODELS
-
-    frame = pd.DataFrame(
-        [
-            {
-                "problem": prompt,
-                "type": "Algebra",
-                "level": "Level 1",
-                "gt_numerator": answer,
-                "gt_denominator": 1,
-            }
-            for prompt, answer in [
-                ("Problem one", 1),
-                ("Problem two", 2),
-                ("one " * 2050, 1),
-            ]
-        ]
-    )
-    records, subset = prepare_training_subset(
-        frame,
-        tokenizer,
-        replace(MODELS["olmo2"], system_prompt="one"),
-        "fixed-data-hash",
-        tmp_path / "subset",
-    )
-    assert subset["counts"] == {"cohort_train": 3, "selected": 2, "overlong": 1}
-    dataset = Dataset.from_list(records)
-    trainer = RLOOTrainer(
-        model=model,
-        args=config,
-        processing_class=tokenizer,
-        train_dataset=dataset,
-        reward_funcs=numeric_reward,
-        peft_config=LoraConfig(
-            task_type="CAUSAL_LM",
-            r=2,
-            lora_alpha=4,
-            target_modules="all-linear",
-            lora_dropout=0.0,
-        ),
-    )
-    frozen = {
-        name: param.detach().clone()
-        for name, param in trainer.model.named_parameters()
-        if not param.requires_grad
-    }
-    assert all(
-        "lora_" in name
-        for name, param in trainer.model.named_parameters()
-        if param.requires_grad
-    )
-    actual_ids, _, _ = trainer._tokenize_prompts(
-        [record["prompt"] for record in records]
-    )
-    assert [len(ids) for ids in actual_ids] == [
-        record["prompt_tokens"] for record in records
-    ]
-    trainer.train()
-    assert trainer.state.global_step == 1
-    for name, param in trainer.model.named_parameters():
-        if name in frozen:
-            assert torch.equal(param.detach(), frozen[name])
-    trainer.save_model(str(tmp_path / "adapter"))
-    saved = json.loads((tmp_path / "adapter/adapter_config.json").read_text())
-    assert saved["peft_type"] == "LORA"
 
 
 def test_native_template_length_filter_and_saved_definition(tmp_path):

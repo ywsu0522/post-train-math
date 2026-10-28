@@ -1,7 +1,7 @@
 # post-train-math
 
 Pinned Hendrycks MATH data, the frozen `boxed-numeric` cohort, and RLOO
-training with TRL + PEFT for two pinned checkpoints. Python 3.12 and uv are
+training with an explicit PyTorch + PEFT loop for two pinned checkpoints. Python 3.12 and uv are
 required. Data preparation and tests run on CPU; evaluation and training require CUDA.
 
 ## Frozen data contract
@@ -189,30 +189,82 @@ This workflow currently supports greedy evaluation and individual series; it
 does not compute pass@K, confidence intervals, or aggregate training seeds.
 Use a distinct series name for each training run when plotting several runs.
 
-RLOO uses TRL 1.12.0 and PEFT 0.20.0. `B` is the global number of prompts per
-optimizer update and `R >= 2` is the number of rollouts per prompt. The global
-sequence batch is `B * R`. Set gradient accumulation with
-`--gradient-accumulation-steps` (default 32). The CLI does not derive or override
-it: `B * R = per_device_train_batch_size * world_size * gradient_accumulation_steps` is required.
-Set sequences per device with `--per-device-train-batch-size` (default 1).
-Inconsistent settings fail before loading model weights. Each rollout batch
-has one optimizer update (`num_iterations=1`). LoRA uses rank 16, alpha 32,
-zero dropout and all linear layers. The pinned base with adapters disabled is
-the fixed reference policy, with KL coefficient 0.05. Advantages are not
-normalized. Sampling uses temperature 1.0 without top-k/top-p restriction.
-See the [TRL RLOO reference](https://huggingface.co/docs/trl/rloo_trainer).
+RLOO uses PyTorch + PEFT directly. Accelerate handles device placement, DDP,
+autocast and AMP; it does not own the iteration loop. There is no RLOOTrainer
+subclass, sampler wrapper, or Trainer callback in the RLOO path.
 
-The optimizer is AdamW (`adamw_torch`). Learning rate is **constant**, with zero
-warmup. Complete `checkpoint-N/` directories are saved every **50 optimizer
-steps**, and Trainer also saves at the end of training. Each checkpoint contains
-LoRA weights, AdamW first/second moments and step counters (`optimizer.pt`), the
-constant scheduler state, trainer state/log history, RNG state for every rank,
-and the AMP scaler when FP16 is used. Checkpoints also contain
-`run_definition.json`, binding them to the pinned model, dataset, training subset,
-batch/optimizer settings, precision, world size, and library versions.
-The repeat sampler uses `seed + epoch`, so checkpoint resume reconstructs the
-same shuffled prompt order, including after an epoch boundary. Checkpoints are
-saved between complete rollout/update batches.
+Read `rloo.py:train_loop` from top to bottom. Each iteration has three explicit
+stages, with a start and completion event printed immediately and appended to
+`iteration_log.jsonl`:
+
+| Stage | Function | Observable state |
+| --- | --- | --- |
+| 1.1 | `generate_rollouts` | Draw B prompts **with replacement**, repeat each G times, generate BG completions with the PEFT policy; log sampled indices and completion count |
+| 1.2 | `estimate_gradients` | Numeric verifier rewards, no-grad policy/reference log probabilities for KL shaping, leave-one-out advantages per prompt, then fresh grad-enabled policy forwards and `backward()` over microbatches |
+| 2 | `update_parameters` | Warmup LR, gradient clipping, `AdamW.step()`, then actual LoRA parameter differences before clearing gradients |
+
+The loop verifies that every trainable parameter is a LoRA A/B matrix in one
+of the seven configured projections and that AdamW contains exactly those
+parameters. Stage 1.2 rejects gradients on frozen base parameters and records
+per-target gradient norms. Stage 2 records `updated`, `changed_lora_tensors`,
+`lora_parameter_delta_norm`, and per-target delta norms. A zero-advantage batch
+can legitimately have no parameter change; the log reports that fact.
+
+For extra prints or logging, edit `log_stage`, insert statements directly in
+`train_loop`, or inspect `rollouts`, `advantages`, `logps` and parameter `.grad`
+in the stage functions. Reward/advantage arrays and their mean, std, min and max
+are saved alongside the gradient diagnostics.
+
+`B` is the global number of prompt draws per optimizer update; `G >= 2`
+(`--rollouts`) is the number of answers per draw. Sequences per device are set
+by `--per-device-train-batch-size` (default 1). The explicit accumulation setting
+(default 32) must satisfy:
+
+```text
+B * G = per_device_train_batch_size * world_size * gradient_accumulation_steps
+```
+
+Each rank processes a contiguous slice of the global BG sequences. Rewards are
+gathered in prompt-major order before computing the G-way baseline, including
+when siblings span ranks. Each microbatch loss is a sum divided by the local
+rollout count; DDP averages ranks, giving the global BG average. Accumulation
+is explicit in stage 1.2; Accelerate's accumulation factor stays at one.
+
+The objective is the on-policy REINFORCE estimator:
+
+```text
+shaped_reward = verifier_reward - beta * (policy_log_prob - reference_log_prob)
+advantage[i,g] = shaped_reward[i,g] - mean(shaped_reward[i,h] for h != g)
+loss = -mean(advantage.detach() * sum_completion_token_log_probs)
+```
+
+The shaped reward uses a no-grad policy pass. A second policy forward builds
+the LoRA graph for backward, so the full BG batch's graphs need not stay in
+memory. This single-update objective has the same on-policy gradient as TRL's
+sequence-ratio surrogate at ratio one; there is no PPO reuse or clipping.
+Advantages are not standardized and token log probabilities are summed, not
+length averaged. LoRA uses rank 16, alpha 32, dropout 0, and explicitly targets
+attention `q_proj`, `k_proj`, `v_proj`, `o_proj` and MLP `gate_proj`, `up_proj`,
+`down_proj`. The reference is the pinned base with adapters disabled; KL beta
+is 0.01. Sampling uses temperature 1, top-p 1 and top-k 0.
+
+The optimizer is `torch.optim.AdamW`, with betas `(0.9, 0.95)`, epsilon `1e-8`,
+weight decay `0`, and gradient norm clipping at `0.5`. For one-based iteration
+`t`, stage 2 explicitly sets `lr = target_lr * min(t / 20, 1)`: the first update
+uses target/20, update 20 reaches the target (default `1e-5`), and later updates
+keep it constant. No separate scheduler object or scheduler checkpoint is needed.
+
+Complete `checkpoint-N/` directories are saved every 50 iterations and at the
+end. They contain the adapter/tokenizer, `optimizer.pt`, `trainer_state.json`,
+`run_definition.json`, and each rank's Torch CPU/device RNG state. FP16 scaler
+state is included with that rank's RNG state. The sampler uses a separate local
+generator seeded with `seed + iteration`, so prompt draws need no epoch cursor.
+Checkpoints are taken only after a full rollout/update iteration.
+
+The new checkpoint engine is `explicit-rloo-v1`. Old TRL checkpoints remain
+usable for inference/evaluation but are rejected for resume by this loop: the
+sampling rule, LR indexing and checkpoint layout have changed. This avoids
+silently treating a different training recipe as an exact continuation.
 
 Resume a full checkpoint, using the same training settings:
 
@@ -221,19 +273,19 @@ uv run --locked post-train-math train --model-key olmo2 --output-dir runs/olmo2-
 ```
 
 `--max-steps 200` is the **total target**, so this continues from step 100 to
-step 200. It may be extended because the constant schedule does not depend on
-the original horizon. Incompatible settings and incomplete checkpoints are
-rejected before writing run artifacts or loading model weights. `adapter/` is
+step 200. It may be extended because the fixed warmup followed by constant LR
+does not depend on the original horizon. Incompatible settings and incomplete
+checkpoints are rejected before writing run artifacts or loading model weights. `adapter/` is
 an inference export; it does not contain AdamW moments and cannot be used for
 training resume. An empty new output directory can also resume a checkpoint
 from another run; a nonempty directory can only resume its own checkpoint.
 `--prepare-only` cannot be combined with resume.
 
-`train_report.json` records `log_history` directly from
-`trainer.state.log_history`, `train_metrics` from the final `trainer.train()`
-result, the final global step, and the resume checkpoint path. Resumed history
-retains the earlier steps loaded from the checkpoint. The final trainer state
-is also saved as `trainer_state.json`.
+`train_report.json` records the final iteration, explicit-loop settings,
+training-subset summary and per-iteration gradient/update history. Resumed
+history retains the earlier iterations from `trainer_state.json`. Stage events
+continue to append to `iteration_log.jsonl`; the actual checkpoint and final
+adapter each carry their own model/data metadata for evaluation.
 
 Training starts from exactly the frozen **5,589** `boxed-numeric` train problems.
 For each model, it tokenizes every full conversation with that model's actual
@@ -299,7 +351,10 @@ post-train-math/
 │   ├── answers.py
 │   ├── data.py
 │   ├── models.py
-│   ├── rloo.py
+│   ├── rloo.py  # visible iteration loop and its three stages
+│   ├── training.py  # settings, model/optimizer setup, CLI entry
+│   ├── training_data.py  # native-chat prompt preparation and audits
+│   ├── checkpoints.py  # adapter/AdamW/RNG save and restore
 │   ├── cli.py
 │   ├── testing.py
 │   ├── evaluation.py
@@ -326,7 +381,8 @@ uv build
 Tests cover the grammar, strict gold-box requirement, reward, original train/test
 membership and order, source/file integrity, model pins, explicit batch settings, native
 chat token counts, the 2048/2049-token boundary, saved subset hashes, CLI workflows, and a
-small real TRL/PEFT CPU training step, adapter export, fresh-model checkpoint
-inference reload, fixed test selection, and offline plotting. They do not run the
+small real OLMo2/Granite PEFT CPU training steps, analytical vs microbatch
+gradients, frozen-base checks, actual LoRA updates, warmup/resume, adapter export,
+fresh-model checkpoint inference reload, fixed test selection, and offline plotting. They do not run the
 full GPU experiment or claim any model accuracy. Historical baseline artifacts
 and local experiments have been removed.

@@ -59,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:
                 "--prompts-per-update", type=int, default=8, help="Global B"
             )
             command.add_argument(
-                "--rollouts", type=int, default=4, help="R per prompt, >= 2"
+                "--rollouts", type=int, default=4, help="G completions per prompt, >= 2"
             )
             command.add_argument(
                 "--per-device-train-batch-size",
@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
                 "--gradient-accumulation-steps",
                 type=int,
                 default=32,
-                help="Optimizer accumulation steps; B*R must equal per-device-train-batch-size*world-size*steps",
+                help="Optimizer accumulation steps; B*G must equal per-device-train-batch-size*world-size*steps",
             )
             command.add_argument(
                 "--prepare-only",
@@ -106,8 +106,8 @@ def run_eval(args) -> dict:
         make_chat_prompt,
         validate_model_source,
     )
-    from post_train_math.rloo import MAX_COMPLETION_LENGTH, MAX_PROMPT_LENGTH
     from post_train_math.testing import select_testing_set
+    from post_train_math.training_data import MAX_COMPLETION_LENGTH, MAX_PROMPT_LENGTH
 
     if args.output_dir.exists() and any(args.output_dir.iterdir()):
         raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
@@ -299,7 +299,7 @@ def main() -> None:
 
             plot_reports(args.reports, args.output_dir)
         else:
-            from post_train_math.rloo import run_train
+            from post_train_math.training import run_train
 
             run_train(args)
     except (OSError, ValueError, RuntimeError, KeyError) as exc:

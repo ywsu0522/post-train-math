@@ -1,127 +1,11 @@
 import copy
+import json
 
 import pytest
 
-from post_train_math.rloo import (
-    build_config,
-    checkpoint_callback,
-    resumable_trainer_class,
-    run_definition,
-    validate_checkpoint,
-)
-
-
-@pytest.fixture
-def tiny_trainer(monkeypatch):
-    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    monkeypatch.setenv("HF_DATASETS_OFFLINE", "1")
-    monkeypatch.setenv("TRL_HUB_TELEMETRY", "0")
-    import torch
-    from datasets import Dataset
-    from peft import LoraConfig
-    from tokenizers import Tokenizer
-    from tokenizers.models import WordLevel
-    from tokenizers.pre_tokenizers import WhitespaceSplit
-    from transformers import (
-        GPT2Config,
-        GPT2LMHeadModel,
-        PreTrainedTokenizerFast,
-        set_seed,
-    )
-
-    from post_train_math.models import MODELS
-
-    threads = torch.get_num_threads()
-    torch.set_num_threads(1)
-
-    def make(output, max_steps):
-        set_seed(42)
-        backend = Tokenizer(
-            WordLevel(
-                {
-                    "[PAD]": 0,
-                    "[EOS]": 1,
-                    "[UNK]": 2,
-                    "one": 3,
-                    "two": 4,
-                    "three": 5,
-                    "four": 6,
-                    "answer": 7,
-                },
-                unk_token="[UNK]",
-            )
-        )
-        backend.pre_tokenizer = WhitespaceSplit()
-        tokenizer = PreTrainedTokenizerFast(
-            tokenizer_object=backend,
-            pad_token="[PAD]",
-            eos_token="[EOS]",
-            unk_token="[UNK]",
-            padding_side="left",
-        )
-        tokenizer.chat_template = (
-            "{% for message in messages %}{{ message['content'] }} {% endfor %}answer"
-        )
-        model = GPT2LMHeadModel(
-            GPT2Config(
-                vocab_size=8,
-                n_layer=1,
-                n_head=1,
-                n_embd=8,
-                n_positions=16,
-                eos_token_id=1,
-                pad_token_id=0,
-                bos_token_id=1,
-                use_cache=False,
-            )
-        )
-        config = build_config(
-            output,
-            prompts=1,
-            rollouts=2,
-            per_device_train_batch_size=2,
-            world_size=1,
-            gradient_accumulation_steps=1,
-            max_steps=max_steps,
-            learning_rate=1e-3,
-            use_cpu=True,
-        )
-        assert config.save_steps == 50
-        config.max_completion_length = 2
-        config.save_steps = 2  # Exercise multiple real saves in a short CPU run.
-        config.disable_tqdm = True
-        lora = LoraConfig(
-            task_type="CAUSAL_LM",
-            r=2,
-            lora_alpha=4,
-            target_modules="all-linear",
-            lora_dropout=0.0,
-        )
-        definition = run_definition(
-            MODELS["olmo2"], "data-hash", {"subset": "fixed"}, config, lora
-        )
-
-        def reward(completions, **kwargs):
-            return [float(i) for i in range(len(completions))]
-
-        trainer = resumable_trainer_class()(
-            model=model,
-            args=config,
-            processing_class=tokenizer,
-            peft_config=lora,
-            reward_funcs=reward,
-            train_dataset=Dataset.from_list(
-                [
-                    {"prompt": [{"role": "user", "content": prompt}]}
-                    for prompt in ("one", "two", "three", "four")
-                ]
-            ),
-            callbacks=[checkpoint_callback(definition)],
-        )
-        return trainer, definition
-
-    yield make
-    torch.set_num_threads(threads)
+from post_train_math.checkpoints import load_checkpoint, validate_checkpoint
+from post_train_math.models import MODELS
+from post_train_math.rloo import train_loop
 
 
 def assert_same_state(expected, actual):
@@ -141,197 +25,129 @@ def assert_same_state(expected, actual):
         assert actual == expected
 
 
-def test_saved_checkpoint_reloads_for_inference_without_final_report(
-    tmp_path, tiny_trainer
-):
+def test_checkpoint_reloads_for_inference_without_final_report(tmp_path, tiny_training):
     import torch
     from peft import PeftModel
 
     from post_train_math.evaluation import adapter_metadata
-    from post_train_math.models import MODELS
 
-    trained, _ = tiny_trainer(tmp_path / "trained", 2)
-    trained.train()
-    trained.model.eval()
-    inputs = {
-        "input_ids": torch.tensor([[3, 7]]),
-        "attention_mask": torch.ones((1, 2), dtype=torch.long),
-    }
-    with torch.inference_mode():
-        expected = trained.model(**inputs).logits.clone()
-    checkpoint = tmp_path / "trained/checkpoint-2"
+    args = tiny_training(tmp_path / "trained", max_steps=2)
+    train_loop(*args)
+    model = args[0]
+    model.eval()
+    inputs = {"input_ids": torch.tensor([[3, 5]]), "attention_mask": torch.ones((1, 2))}
+    with torch.no_grad():
+        expected = model(**inputs).logits.clone()
+    checkpoint = args[4].output_dir / "checkpoint-2"
     assert not (checkpoint.parent / "train_report.json").exists()
     metadata = adapter_metadata(checkpoint, MODELS["olmo2"], "data-hash")
-    assert metadata["rollout_iterations"] == 2
-    fresh, _ = tiny_trainer(tmp_path / "fresh", 2)
-    base = fresh.model.unload()
-    reloaded = PeftModel.from_pretrained(base, checkpoint, local_files_only=True)
+    assert metadata["rollout_iterations"] == metadata["optimizer_steps"] == 2
+    fresh = tiny_training(tmp_path / "fresh")[0]
+    reloaded = PeftModel.from_pretrained(
+        fresh.unload(), checkpoint, local_files_only=True
+    )
     reloaded.eval()
-    with torch.inference_mode():
-        actual = reloaded(**inputs).logits
-    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    with torch.no_grad():
+        torch.testing.assert_close(reloaded(**inputs).logits, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("stop_step", [2, 4])
-def test_full_checkpoint_restores_adamw_and_continues_identically(
-    tmp_path, tiny_trainer, stop_step
+@pytest.mark.parametrize("stop_step", [1, 3, 21])
+def test_checkpoint_restores_adamw_rng_and_sampling_across_warmup(
+    tmp_path, tiny_training, stop_step
 ):
-    import torch
-    from transformers import TrainerCallback
-
-    continuous, _ = tiny_trainer(tmp_path / "continuous", 6)
-    continuous.train()
-    uninterrupted_weights = {
-        key: value.detach().clone()
-        for key, value in continuous.model.state_dict().items()
+    continuous = tiny_training(tmp_path / "continuous", max_steps=23)
+    expected_history = train_loop(*continuous)
+    expected_weights = {
+        n: p.detach().clone() for n, p in continuous[0].named_parameters()
     }
-    uninterrupted_optimizer = copy.deepcopy(continuous.optimizer.state_dict())
-    partial, definition = tiny_trainer(tmp_path / "resumed", stop_step)
-    partial.train()
-    checkpoint = tmp_path / f"resumed/checkpoint-{stop_step}"
-    validate_checkpoint(checkpoint, definition, max_steps=6)
-    saved_optimizer = torch.load(checkpoint / "optimizer.pt", weights_only=True)
-    assert saved_optimizer["state"]
-    assert all(
-        "exp_avg" in state and "exp_avg_sq" in state
-        for state in saved_optimizer["state"].values()
+    expected_optimizer = copy.deepcopy(continuous[3].state_dict())
+    partial = tiny_training(tmp_path / "resumed", max_steps=stop_step)
+    train_loop(*partial)
+    checkpoint = partial[4].output_dir / f"checkpoint-{stop_step}"
+    resumed = tiny_training(tmp_path / "resumed", max_steps=23)
+    history = train_loop(*resumed, resume=checkpoint)
+    assert history == expected_history
+    assert history[0]["learning_rate"] == pytest.approx(1e-3 / 20)
+    assert history[19]["learning_rate"] == history[-1]["learning_rate"] == 1e-3
+    assert_same_state(expected_weights, dict(resumed[0].named_parameters()))
+    assert_same_state(expected_optimizer, resumed[3].state_dict())
+    state = json.loads(
+        (resumed[4].output_dir / "checkpoint-23/trainer_state.json").read_text()
     )
-    assert any(
-        state["exp_avg"].count_nonzero() for state in saved_optimizer["state"].values()
-    )
-    saved_scheduler = torch.load(checkpoint / "scheduler.pt", weights_only=True)
-    for step in range(2, stop_step + 1, 2):
-        assert (tmp_path / f"resumed/checkpoint-{step}/run_definition.json").is_file()
-    resumed, current_definition = tiny_trainer(tmp_path / "resumed", 6)
-    validate_checkpoint(checkpoint, current_definition, max_steps=6)
-    restored = []
-
-    class CheckRestored(TrainerCallback):
-        def on_train_begin(
-            self, args, state, control, optimizer=None, lr_scheduler=None, **kwargs
-        ):
-            assert state.global_step == stop_step
-            assert_same_state(saved_optimizer, optimizer.state_dict())
-            assert_same_state(saved_scheduler, lr_scheduler.state_dict())
-            restored.append(True)
-
-    resumed.add_callback(CheckRestored())
-    result = resumed.train(resume_from_checkpoint=str(checkpoint))
-    assert restored and resumed.state.global_step == 6
-    assert "train_loss" in result.metrics
-    assert {record["step"] for record in resumed.state.log_history} >= {
-        1,
-        2,
-        3,
-        4,
-        5,
-        6,
-    }
-    assert all(
-        record["learning_rate"] == 1e-3
-        for record in resumed.state.log_history
-        if "learning_rate" in record
-    )
-    assert_same_state(uninterrupted_weights, resumed.model.state_dict())
-    assert_same_state(uninterrupted_optimizer, resumed.optimizer.state_dict())
+    assert state["global_step"] == 23
 
 
-def test_incomplete_or_incompatible_resume_is_rejected(tmp_path, tiny_trainer):
-    trainer, definition = tiny_trainer(tmp_path, 2)
-    trainer.train()
-    checkpoint = tmp_path / "checkpoint-2"
-    validate_checkpoint(checkpoint, definition, max_steps=3)
+def test_incomplete_incompatible_and_inference_only_checkpoints_are_rejected(
+    tmp_path, tiny_training
+):
+    args = tiny_training(tmp_path, max_steps=1)
+    train_loop(*args)
+    checkpoint = tmp_path / "checkpoint-1"
+    definition = args[-1]
+    validate_checkpoint(checkpoint, definition, 2)
     with pytest.raises(ValueError, match="max-steps must exceed"):
-        validate_checkpoint(checkpoint, definition, max_steps=2)
+        validate_checkpoint(checkpoint, definition, 1)
     changed = copy.deepcopy(definition)
     changed["training"]["learning_rate"] *= 2
     with pytest.raises(ValueError, match="settings differ"):
-        validate_checkpoint(checkpoint, changed, max_steps=3)
+        validate_checkpoint(checkpoint, changed, 2)
+    with pytest.raises(ValueError, match="optimizer.pt"):
+        validate_checkpoint(tmp_path / "adapter", definition, 2)
     (checkpoint / "optimizer.pt").unlink()
     with pytest.raises(ValueError, match="optimizer.pt"):
-        validate_checkpoint(checkpoint, definition, max_steps=3)
+        load_checkpoint(checkpoint, args[0], args[3], args[5], definition, 2)
 
 
-def test_training_report_saves_history_and_final_metrics(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
+def test_cli_training_setup_runs_real_loop_and_exports_evaluable_adapter(
+    tmp_path, tiny_training, monkeypatch
+):
     import pandas as pd
     import torch
     import transformers
 
-    from post_train_math import rloo
+    from post_train_math import training
     from post_train_math.cli import build_parser
+    from post_train_math.evaluation import adapter_metadata
 
+    tiny = tiny_training(tmp_path / "template")
+    base = tiny[0].unload()
+    tokenizer = tiny[1]
     frame = pd.DataFrame(
         [
             {
-                "problem": "one",
+                "problem": text,
                 "type": "Algebra",
                 "level": "Level 1",
                 "gt_numerator": 1,
                 "gt_denominator": 1,
             }
+            for text in ("one", "two")
         ]
     )
-    monkeypatch.setattr(rloo, "FROZEN_TRAIN_ROWS", 1)
+    monkeypatch.setattr(training, "FROZEN_TRAIN_ROWS", 2)
     monkeypatch.setattr(
-        rloo,
+        training,
         "validate_processed_manifest",
-        lambda _: (
-            {"cohort": {"name": "boxed-numeric"}},
-            "data-hash",
-        ),
+        lambda _: ({"cohort": {"name": "boxed-numeric"}}, "data-hash"),
     )
-    monkeypatch.setattr(rloo, "load_cohort", lambda *_: frame)
-    monkeypatch.setattr(rloo, "validate_model_source", lambda *_: {"pinned": True})
-    tokenizer = SimpleNamespace(
-        get_chat_template=lambda: "native",
-        get_vocab=lambda: {"one": 1},
-        special_tokens_map={},
-        apply_chat_template=lambda *_args, **_kwargs: {"input_ids": [1, 2]},
-        save_pretrained=lambda _: None,
-    )
-    monkeypatch.setattr(rloo, "load_tokenizer", lambda _: tokenizer)
+    monkeypatch.setattr(training, "load_cohort", lambda *_: frame)
+    monkeypatch.setattr(training, "validate_model_source", lambda *_: {"pinned": True})
+    monkeypatch.setattr(training, "load_tokenizer", lambda _: tokenizer)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    original_config = build_config
-
-    def cpu_config(*args, **kwargs):
-        return original_config(*args, **kwargs, use_cpu=True)
-
-    monkeypatch.setattr(rloo, "build_config", cpu_config)
     monkeypatch.setattr(
         transformers.AutoModelForCausalLM,
         "from_pretrained",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            config=SimpleNamespace(use_cache=True)
-        ),
+        lambda *_args, **_kwargs: base,
     )
-    history = [{"step": 1, "loss": 0.25}, {"step": 2, "loss": 0.125}]
-    metrics = {"train_loss": 0.1875, "train_runtime": 1.5}
-    calls = []
+    build_config = training.build_config
 
-    class Trainer:
-        def __init__(self, **kwargs):
-            self.state = SimpleNamespace(global_step=2, log_history=history)
-            assert kwargs["args"].per_device_train_batch_size == 2
-            assert kwargs["args"].save_steps == 50
+    def cpu_config(*args, **kwargs):
+        config = build_config(*args, **kwargs, use_cpu=True)
+        config.max_completion_length = 2
+        config.save_steps = 1
+        return config
 
-        def train(self, *, resume_from_checkpoint):
-            assert resume_from_checkpoint is None
-            return SimpleNamespace(metrics=metrics)
-
-        def save_state(self):
-            calls.append("state saved")
-
-        def save_model(self, path):
-            from pathlib import Path
-
-            Path(path).mkdir(parents=True)
-
-        def is_world_process_zero(self):
-            return True
-
-    monkeypatch.setattr(rloo, "resumable_trainer_class", lambda: Trainer)
+    monkeypatch.setattr(training, "build_config", cpu_config)
     args = build_parser().parse_args(
         [
             "train",
@@ -340,24 +156,23 @@ def test_training_report_saves_history_and_final_metrics(tmp_path, monkeypatch):
             "--output-dir",
             str(tmp_path / "run"),
             "--prompts-per-update",
-            "1",
+            "2",
             "--rollouts",
             "2",
             "--per-device-train-batch-size",
             "2",
             "--gradient-accumulation-steps",
-            "1",
+            "2",
             "--max-steps",
             "2",
         ]
     )
-    rloo.run_train(args)
-    import json
-
+    training.run_train(args)
     report = json.loads((args.output_dir / "train_report.json").read_text())
-    assert report["log_history"] == history
-    assert report["train_metrics"] == metrics
-    assert report["global_step"] == 2
-    assert report["resume_from_checkpoint"] is None
-    assert report["training_config"]["lr_scheduler_type"] == "constant"
-    assert calls == ["state saved"]
+    assert report["global_step"] == len(report["log_history"]) == 2
+    assert (args.output_dir / "training_subset.jsonl").is_file()
+    metadata = adapter_metadata(
+        args.output_dir / "adapter", MODELS["olmo2"], "data-hash"
+    )
+    assert metadata["rollout_iterations"] == metadata["optimizer_steps"] == 2
+    assert metadata["prompts_per_rollout_iteration"] == 2

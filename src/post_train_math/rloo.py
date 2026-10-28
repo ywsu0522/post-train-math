@@ -1,506 +1,469 @@
-"""RLOO with TRL and LoRA; the frozen base checkpoint is the reference policy."""
+"""An observable RLOO iteration: generate -> reward/advantage/backward -> AdamW.
+
+Only LoRA matrices receive gradients. The frozen reference is this same PEFT
+model with adapters disabled. No Trainer subclass or hidden training loop.
+"""
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
-from importlib.metadata import version
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 
+import torch
+from torch.nn.utils.rnn import pad_sequence
+
 from post_train_math.answers import numeric_reward
-from post_train_math.data import COHORT_NAME, load_cohort, validate_processed_manifest
-from post_train_math.models import (
-    MODELS,
-    load_tokenizer,
-    make_chat_messages,
-    validate_model_source,
-)
-
-MAX_PROMPT_LENGTH = 2048
-MAX_COMPLETION_LENGTH = 2048
-FROZEN_TRAIN_ROWS = 5589
-CHECKPOINT_STEPS = 50
+from post_train_math.checkpoints import load_checkpoint, save_checkpoint
+from post_train_math.training import LORA_TARGET_MODULES, validate_batch
 
 
-def resumable_trainer_class():
-    """Make the repeat sampler reproducible from the checkpoint's epoch."""
-    from torch.utils.data import Sampler
-    from trl import RLOOTrainer
-
-    class EpochSampler(Sampler):
-        def __init__(self, sampler):
-            self.sampler = sampler
-            self.epoch = 0
-
-        def set_epoch(self, epoch):
-            self.epoch = epoch
-
-        def __len__(self):
-            return len(self.sampler)
-
-        def __iter__(self):
-            if self.sampler.shuffle:
-                self.sampler.generator.manual_seed(self.sampler.seed + self.epoch)
-            yield from self.sampler
-
-    class ResumableRLOOTrainer(RLOOTrainer):
-        def _get_train_sampler(self, dataset=None):
-            return EpochSampler(super()._get_train_sampler(dataset))
-
-    return ResumableRLOOTrainer
+@dataclass
+class Rollouts:
+    records: list[dict]
+    prompt_ids: list[list[int]]
+    completion_ids: list[list[int]]
+    texts: list[str]
+    sampled_indices: list[int]
 
 
-def checkpoint_callback(definition: dict):
-    """Bind each complete Trainer checkpoint to its data and training settings."""
-    from transformers import TrainerCallback
-
-    class CheckpointDefinitionCallback(TrainerCallback):
-        def on_save(self, args, state, control, **kwargs):
-            if state.is_world_process_zero:
-                checkpoint = Path(args.output_dir) / f"checkpoint-{state.global_step}"
-                (checkpoint / "run_definition.json").write_text(
-                    json.dumps(definition, sort_keys=True, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-
-    return CheckpointDefinitionCallback()
+def log_stage(accelerator, output_dir, iteration, stage, **values):
+    """Edit here, or add print/log statements directly around the three stages."""
+    if accelerator.is_main_process:
+        event = {"iteration": iteration, "stage": stage, **values}
+        line = json.dumps(event, ensure_ascii=False, allow_nan=False)
+        print(line, flush=True)
+        with (Path(output_dir) / "iteration_log.jsonl").open(
+            "a", encoding="utf-8"
+        ) as f:
+            f.write(line + "\n")
 
 
-def validate_checkpoint(checkpoint: Path, definition: dict, *, max_steps: int) -> None:
-    """Never silently fall back to a weights-only or incompatible restart."""
-    required = [
-        "adapter_config.json",
-        "optimizer.pt",
-        "scheduler.pt",
-        "trainer_state.json",
-        "training_args.bin",
-        "run_definition.json",
-    ]
-    world_size = definition["world_size"]
-    required += (
-        ["rng_state.pth"]
-        if world_size == 1
-        else [f"rng_state_{rank}.pth" for rank in range(world_size)]
-    )
-    if definition["training"]["fp16"]:
-        required.append("scaler.pt")
-    missing = [name for name in required if not (checkpoint / name).is_file()]
-    if not any(
-        (checkpoint / name).is_file()
-        for name in ("adapter_model.safetensors", "adapter_model.bin")
-    ):
-        missing.append("adapter_model.safetensors or adapter_model.bin")
-    if missing:
-        raise ValueError(
-            f"Incomplete training checkpoint {checkpoint}: missing {', '.join(missing)}"
-        )
-    saved = json.loads((checkpoint / "run_definition.json").read_text(encoding="utf-8"))
-    if saved != definition:
-        raise ValueError(
-            "Checkpoint model, data, subset, world size or training settings differ"
-        )
-    state = json.loads((checkpoint / "trainer_state.json").read_text(encoding="utf-8"))
-    if not 0 < state["global_step"] < max_steps:
-        raise ValueError(
-            "max-steps must exceed the checkpoint global_step (total target, not extra steps)"
-        )
-
-
-def run_definition(spec, manifest_hash: str, subset: dict, config, lora) -> dict:
-    """Settings that must remain identical; max_steps may be extended with constant LR."""
-    keys = (
-        "learning_rate",
-        "lr_scheduler_type",
-        "warmup_steps",
-        "optim",
-        "adam_beta1",
-        "adam_beta2",
-        "adam_epsilon",
-        "weight_decay",
-        "max_grad_norm",
-        "per_device_train_batch_size",
-        "gradient_accumulation_steps",
-        "generation_batch_size",
-        "num_generations",
-        "num_iterations",
-        "max_completion_length",
-        "chat_template_kwargs",
-        "beta",
-        "temperature",
-        "top_p",
-        "top_k",
-        "normalize_advantages",
-        "sync_ref_model",
-        "seed",
-        "data_seed",
-        "bf16",
-        "fp16",
-        "gradient_checkpointing",
-    )
-    values = config.to_dict()
-    return {
-        "model": {"repo_id": spec.repo_id, "revision": spec.revision},
-        "data_manifest_sha256": manifest_hash,
-        "training_subset": subset,
-        "world_size": config.world_size,
-        "sampler_seed_rule": "seed + epoch",
-        "training": {key: values[key] for key in keys},
-        "lora": lora.to_dict(),
-        "versions": {
-            package: version(package)
-            for package in ("torch", "trl", "peft", "transformers")
-        },
-    }
-
-
-def validate_batch(
-    prompts: int,
-    rollouts: int,
-    per_device_train_batch_size: int,
-    world_size: int,
-    gradient_accumulation_steps: int,
-) -> None:
-    if (
-        prompts < 1
-        or rollouts < 2
-        or per_device_train_batch_size < 1
-        or world_size < 1
-        or gradient_accumulation_steps < 1
-    ):
-        raise ValueError(
-            "B, per-device-train-batch-size, world size and accumulation must be positive; R must be >= 2"
-        )
-    if (
-        prompts * rollouts
-        != per_device_train_batch_size * world_size * gradient_accumulation_steps
-    ):
-        raise ValueError(
-            "B * R must equal per-device-train-batch-size * world-size * gradient-accumulation-steps "
-            "to keep one optimizer update per rollout batch"
-        )
-
-
-def _json_bytes(value) -> bytes:
-    return json.dumps(
-        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
-
-
-def prepare_training_subset(
-    frame,
+def train_loop(
+    model,
     tokenizer,
-    spec,
-    data_manifest_hash: str,
-    output_dir: Path,
+    records,
+    optimizer,
+    config,
+    accelerator,
+    definition,
     *,
-    write_artifacts: bool = True,
-) -> tuple[list[dict], dict]:
-    """Audit every frozen train question using the same native template as TRL."""
-    template = tokenizer.get_chat_template()
-    selected, audit, overlong = [], [], []
-    seen = set()
-    for row in frame.itertuples(index=False):
-        problem_id = "math-" + hashlib.sha256(row.problem.encode("utf-8")).hexdigest()
-        if problem_id in seen:
-            raise ValueError(f"Duplicate train problem ID: {problem_id}")
-        seen.add(problem_id)
-        prompt = make_chat_messages(spec, row.problem)
-        encoded = tokenizer.apply_chat_template(
-            prompt,
+    resume=None,
+    reward_fn=numeric_reward,
+):
+    """One visible loop. Each iteration consumes a NEW rollout batch, updates once."""
+    validate_batch(
+        config.prompts_per_update,
+        config.num_generations,
+        config.per_device_train_batch_size,
+        accelerator.num_processes,
+        config.gradient_accumulation_steps,
+    )
+    if not records:
+        raise ValueError("Training cohort is empty")
+    if accelerator.gradient_accumulation_steps != 1:
+        raise ValueError(
+            "This loop accumulates explicitly; Accelerate's factor must be 1"
+        )
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    trainable = verify_lora_targets(model)
+    optimizer_parameters = {
+        id(p) for group in optimizer.param_groups for p in group["params"]
+    }
+    if optimizer_parameters != {id(p) for p in trainable.values()}:
+        raise ValueError("AdamW must contain exactly the trainable LoRA parameters")
+    step, history = (
+        (0, [])
+        if resume is None
+        else load_checkpoint(
+            resume, model, optimizer, accelerator, definition, config.max_steps
+        )
+    )
+    log_stage(
+        accelerator,
+        config.output_dir,
+        step,
+        "setup",
+        lora_targets=list(LORA_TARGET_MODULES),
+        lora_parameter_tensors=len(trainable),
+        trainable_parameters=sum(p.numel() for p in trainable.values()),
+    )
+    for iteration in range(step + 1, config.max_steps + 1):
+        # Stage 1.1: sample B prompts; PEFT generate -> BG completions.
+        log_stage(accelerator, config.output_dir, iteration, "1.1", status="start")
+        rollouts = generate_rollouts(
+            model, tokenizer, records, config, accelerator, iteration
+        )
+        log_stage(
+            accelerator,
+            config.output_dir,
+            iteration,
+            "1.1",
+            status="complete",
+            sampled_indices=rollouts.sampled_indices,
+            sampled_problem_ids=[
+                records[i]["problem_id"] for i in rollouts.sampled_indices
+            ],
+            prompts=config.prompts_per_update,
+            completions=config.generation_batch_size,
+        )
+
+        # Stage 1.2: verifier + frozen reference -> LOO advantages -> LoRA .grad.
+        log_stage(accelerator, config.output_dir, iteration, "1.2", status="start")
+        gradient_stats = estimate_gradients(
+            model,
+            tokenizer,
+            rollouts,
+            optimizer,
+            config,
+            accelerator,
+            iteration,
+            trainable,
+            reward_fn,
+        )
+        log_stage(
+            accelerator,
+            config.output_dir,
+            iteration,
+            "1.2",
+            status="complete",
+            **gradient_stats,
+        )
+
+        # Stage 2: AdamW consumes the accumulated .grad; verify LoRA changed.
+        log_stage(accelerator, config.output_dir, iteration, "2", status="start")
+        update_stats = update_parameters(
+            optimizer, config, accelerator, iteration, trainable
+        )
+        log_stage(
+            accelerator,
+            config.output_dir,
+            iteration,
+            "2",
+            status="complete",
+            **update_stats,
+        )
+        history.append({"step": iteration, **gradient_stats, **update_stats})
+
+        if iteration % config.save_steps == 0 or iteration == config.max_steps:
+            save_checkpoint(
+                config.output_dir / f"checkpoint-{iteration}",
+                model,
+                tokenizer,
+                optimizer,
+                accelerator,
+                definition,
+                iteration,
+                history,
+            )
+    save_checkpoint(
+        config.output_dir / "adapter",
+        model,
+        tokenizer,
+        optimizer,
+        accelerator,
+        definition,
+        config.max_steps,
+        history,
+        weights_only=True,
+    )
+    return history
+
+
+def generate_rollouts(model, tokenizer, records, config, accelerator, iteration):
+    """Stage 1.1: sample global B prompts WITH replacement, generate B*G answers."""
+    generator = torch.Generator().manual_seed(config.seed + iteration)
+    indices = torch.randint(
+        len(records), (config.prompts_per_update,), generator=generator
+    ).tolist()
+    expanded = [records[i] for i in indices for _ in range(config.num_generations)]
+    count = len(expanded) // accelerator.num_processes
+    start = accelerator.process_index * count
+    local_records = expanded[start : start + count]
+    policy = accelerator.unwrap_model(model)
+    policy.eval()
+    prompt_ids, completion_ids = [], []
+    eos = policy.generation_config.eos_token_id
+    eos = eos if isinstance(eos, list) else [eos]
+    eos = [token for token in eos if token is not None]
+    for start in range(0, count, config.per_device_train_batch_size):
+        rows = local_records[start : start + config.per_device_train_batch_size]
+        inputs = tokenizer.apply_chat_template(
+            [row["prompt"] for row in rows],
             tokenize=True,
             add_generation_prompt=True,
             truncation=False,
-            padding=False,
+            padding=True,
+            return_tensors="pt",
             return_dict=True,
-        )
-        token_ids = encoded["input_ids"]
-        prompt_tokens = len(token_ids)
-        included = prompt_tokens <= MAX_PROMPT_LENGTH
-        entry = {
-            "problem_id": problem_id,
-            "prompt_tokens": prompt_tokens,
-            "type": row.type,
-            "level": row.level,
-            "included": included,
-            "prompt_token_ids_sha256": hashlib.sha256(
-                _json_bytes(token_ids)
-            ).hexdigest(),
-        }
-        audit.append(entry)
-        if included:
-            selected.append(
-                {
-                    **entry,
-                    "prompt": prompt,
-                    "gt_numerator": int(row.gt_numerator),
-                    "gt_denominator": int(row.gt_denominator),
-                }
+        ).to(accelerator.device)
+        with torch.no_grad(), accelerator.autocast():
+            generated = policy.generate(
+                **inputs,
+                do_sample=True,
+                temperature=config.temperature,
+                top_p=config.top_p,
+                top_k=config.top_k,
+                max_new_tokens=config.max_completion_length,
+                pad_token_id=tokenizer.pad_token_id,
             )
-        else:
-            overlong.append(entry)
-    # Record the actual tokenizer state as well as the pinned checkpoint identity.
-    backend = getattr(tokenizer, "backend_tokenizer", None)
-    tokenizer_state = (
-        backend.to_str().encode("utf-8")
-        if backend is not None
-        else _json_bytes(tokenizer.get_vocab())
+        completions = generated[:, inputs["input_ids"].size(1) :]
+        # Retain the first EOS itself, discard tokens/padding after it.
+        is_eos = torch.isin(completions, torch.tensor(eos, device=completions.device))
+        mask = is_eos.long().cumsum(1) - is_eos.long() == 0
+        prompt_ids.extend(
+            ids[valid.bool()].tolist()
+            for ids, valid in zip(
+                inputs["input_ids"], inputs["attention_mask"], strict=True
+            )
+        )
+        completion_ids.extend(
+            ids[valid].tolist() for ids, valid in zip(completions, mask, strict=True)
+        )
+    if len(completion_ids) != count or any(not ids for ids in completion_ids):
+        raise RuntimeError(
+            "Generation must return one nonempty completion per sequence"
+        )
+    return Rollouts(
+        local_records,
+        prompt_ids,
+        completion_ids,
+        tokenizer.batch_decode(completion_ids, skip_special_tokens=True),
+        indices,
     )
-    artifacts = {
-        "training_subset.jsonl": selected,
-        "prompt_audit.jsonl": audit,
-        "overlong_prompts.jsonl": overlong,
-    }
-    payloads = {
-        name: b"".join(_json_bytes(row) + b"\n" for row in rows)
-        for name, rows in artifacts.items()
-    }
-    definition = {
-        "cohort": COHORT_NAME,
-        "split": "train",
-        "data_manifest_sha256": data_manifest_hash,
-        "problem_id_definition": "math- + SHA256 of the original problem text encoded as UTF-8",
-        "model": {"key": spec.key, "repo_id": spec.repo_id, "revision": spec.revision},
-        "tokenization": {
-            "chat_template": template,
-            "chat_template_sha256": hashlib.sha256(
-                template.encode("utf-8")
-            ).hexdigest(),
-            "system_prompt": spec.system_prompt,
-            "tokenizer_class": type(tokenizer).__name__,
-            "tokenizer_state_sha256": hashlib.sha256(tokenizer_state).hexdigest(),
-            "special_tokens_map": tokenizer.special_tokens_map,
-            "add_generation_prompt": True,
-            "truncation": False,
-            "padding": False,
-            "transformers_version": version("transformers"),
-            "tokenizers_version": version("tokenizers"),
-        },
-        "selection": {
-            "field": "prompt_tokens",
-            "operator": "<=",
-            "threshold": MAX_PROMPT_LENGTH,
-        },
-        "counts": {
-            "cohort_train": len(audit),
-            "selected": len(selected),
-            "overlong": len(overlong),
-        },
-        "files_sha256": {
-            name: hashlib.sha256(payload).hexdigest()
-            for name, payload in payloads.items()
-        },
-    }
-    if write_artifacts:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for name, payload in payloads.items():
-            (output_dir / name).write_bytes(payload)
-        (output_dir / "training_subset_manifest.json").write_bytes(
-            json.dumps(definition, ensure_ascii=False, sort_keys=True, indent=2).encode(
-                "utf-8"
-            )
-            + b"\n"
-        )
-    return selected, definition
 
 
-def build_config(
-    output_dir: Path,
-    *,
-    prompts: int,
-    rollouts: int,
-    per_device_train_batch_size: int,
-    world_size: int,
-    gradient_accumulation_steps: int,
-    max_steps: int,
-    learning_rate: float,
-    use_cpu: bool = False,
-):
-    import torch
-    from trl import RLOOConfig
-
-    validate_batch(
+def sequence_log_probs(model, tokenizer, rollouts, start, end, device):
+    """Differentiable sum of completion-token log probabilities, including EOS."""
+    prompts = [
+        torch.tensor(ids, device=device) for ids in rollouts.prompt_ids[start:end]
+    ]
+    answers = [
+        torch.tensor(ids, device=device) for ids in rollouts.completion_ids[start:end]
+    ]
+    prompt_ids = pad_sequence(
         prompts,
-        rollouts,
-        per_device_train_batch_size,
-        world_size,
-        gradient_accumulation_steps,
+        batch_first=True,
+        padding_value=tokenizer.pad_token_id,
+        padding_side="left",
     )
-    if max_steps < 1 or learning_rate <= 0:
-        raise ValueError("max-steps and learning-rate must be positive")
-    return RLOOConfig(
-        output_dir=str(output_dir),
-        per_device_train_batch_size=per_device_train_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        generation_batch_size=prompts * rollouts,
-        num_generations=rollouts,
-        num_iterations=1,
-        max_completion_length=MAX_COMPLETION_LENGTH,
-        chat_template_kwargs={"truncation": False},
-        max_steps=max_steps,
-        learning_rate=learning_rate,
-        lr_scheduler_type="constant",
-        warmup_steps=0,
-        optim="adamw_torch",
-        beta=0.05,
-        temperature=1.0,
-        top_p=1.0,
-        top_k=0,
-        normalize_advantages=False,
-        sync_ref_model=False,
-        remove_unused_columns=False,
-        seed=42,
-        data_seed=42,
-        use_cpu=use_cpu,
-        bf16=not use_cpu and torch.cuda.is_bf16_supported(),
-        fp16=not use_cpu and not torch.cuda.is_bf16_supported(),
-        gradient_checkpointing=True,
-        report_to="none",
-        logging_steps=1,
-        save_strategy="steps",
-        save_steps=CHECKPOINT_STEPS,
-        save_total_limit=None,
-        save_only_model=False,
-        restore_callback_states_from_checkpoint=True,
-        ignore_data_skip=False,
+    answer_ids = pad_sequence(
+        answers, batch_first=True, padding_value=tokenizer.pad_token_id
     )
+    prompt_mask = pad_sequence(
+        [torch.ones_like(ids) for ids in prompts], batch_first=True, padding_side="left"
+    )
+    answer_mask = pad_sequence(
+        [torch.ones_like(ids) for ids in answers], batch_first=True
+    )
+    attention_mask = torch.cat([prompt_mask, answer_mask], dim=1)
+    outputs = model(
+        input_ids=torch.cat([prompt_ids, answer_ids], dim=1),
+        attention_mask=attention_mask,
+        position_ids=(attention_mask.cumsum(1) - 1).clamp(min=0),
+        logits_to_keep=answer_ids.size(1) + 1,
+        use_cache=False,
+    )
+    logits = outputs.logits[:, :-1].float()
+    token_logps = logits.gather(2, answer_ids.unsqueeze(-1)).squeeze(-1)
+    token_logps = token_logps - logits.logsumexp(-1)
+    return (token_logps * answer_mask).sum(1)
 
 
-def run_train(args) -> None:
-    resume = args.resume_from_checkpoint
-    if resume and args.prepare_only:
-        raise ValueError(
-            "--resume-from-checkpoint cannot be combined with --prepare-only"
-        )
-    if not resume and args.output_dir.exists() and any(args.output_dir.iterdir()):
-        raise FileExistsError(f"Output directory is not empty: {args.output_dir}")
-    if (
-        resume
-        and args.output_dir.exists()
-        and any(args.output_dir.iterdir())
-        and resume.resolve().parent != args.output_dir.resolve()
-    ):
-        raise ValueError(
-            "A nonempty output-dir can only resume one of its own checkpoints"
-        )
-    manifest, manifest_hash = validate_processed_manifest(args.data_dir)
-    spec = MODELS[args.model_key]
-    model_dir = args.model_dir or Path(spec.local_dir)
-    frame = load_cohort(args.data_dir, "train")
-    if len(frame) != FROZEN_TRAIN_ROWS:
-        raise ValueError(
-            f"Expected the fixed {FROZEN_TRAIN_ROWS}-question boxed-numeric train cohort"
-        )
-    if args.prepare_only and args.model_dir is None and not model_dir.exists():
-        # CPU audit needs only the tokenizer at the exact pinned commit, not weights.
-        tokenizer = load_tokenizer(spec.repo_id, revision=spec.revision)
-        source = None
-    else:
-        source = validate_model_source(model_dir, spec)
-        tokenizer = load_tokenizer(model_dir)
-    if args.prepare_only:
-        is_main_process = int(os.environ.get("RANK", "0")) == 0
-        _, subset = prepare_training_subset(
-            frame,
-            tokenizer,
-            spec,
-            manifest_hash,
-            args.output_dir,
-            write_artifacts=is_main_process,
-        )
-        if is_main_process:
-            print(json.dumps(subset["counts"], indent=2))
-        return
+def leave_one_out_advantages(rewards, group_size):
+    if group_size < 2 or rewards.numel() % group_size:
+        raise ValueError("RLOO needs complete groups with G >= 2")
+    grouped = rewards.reshape(-1, group_size)
+    baseline = (grouped.sum(1, keepdim=True) - grouped) / (group_size - 1)
+    return (grouped - baseline).reshape(-1).detach()
 
-    import torch
-    from datasets import Dataset
-    from peft import LoraConfig
-    from transformers import AutoModelForCausalLM, set_seed
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("RLOO training requires CUDA")
-    config = build_config(
-        args.output_dir,
-        prompts=args.prompts_per_update,
-        rollouts=args.rollouts,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        world_size=int(os.environ.get("WORLD_SIZE", "1")),
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        max_steps=args.max_steps,
-        learning_rate=args.learning_rate,
+def verify_lora_targets(model):
+    """Fail before training if any base/head parameter is trainable."""
+    trainable = {name: p for name, p in model.named_parameters() if p.requires_grad}
+    targets = set()
+    for name in trainable:
+        if not any(part in name for part in (".lora_A.", ".lora_B.")):
+            raise ValueError(f"Non-LoRA trainable parameter: {name}")
+        target = name.split(".lora_")[0].rsplit(".", 1)[-1]
+        if target not in LORA_TARGET_MODULES:
+            raise ValueError(f"Unexpected LoRA target: {name}")
+        targets.add(target)
+    if targets != set(LORA_TARGET_MODULES):
+        raise ValueError(f"Missing LoRA targets: {set(LORA_TARGET_MODULES) - targets}")
+    return trainable
+
+
+def gradient_statistics(model, trainable):
+    for name, parameter in model.named_parameters():
+        if not parameter.requires_grad and parameter.grad is not None:
+            raise RuntimeError(f"Frozen base parameter received gradient: {name}")
+    by_target = {target: [] for target in LORA_TARGET_MODULES}
+    for name, parameter in trainable.items():
+        if parameter.grad is None:
+            raise RuntimeError(f"LoRA parameter has no gradient: {name}")
+        norm = parameter.grad.detach().float().norm()
+        if not torch.isfinite(norm):
+            raise RuntimeError(f"Non-finite LoRA gradient: {name}")
+        by_target[name.split(".lora_")[0].rsplit(".", 1)[-1]].append(norm)
+    return {
+        "lora_gradient_norm_by_target": {
+            name: torch.stack(norms).norm().item() for name, norms in by_target.items()
+        },
+        "base_gradient_tensors": 0,
+        "lora_gradient_tensors": len(trainable),
+    }
+
+
+def estimate_gradients(
+    model,
+    tokenizer,
+    rollouts,
+    optimizer,
+    config,
+    accelerator,
+    iteration,
+    trainable,
+    reward_fn=numeric_reward,
+):
+    """Stage 1.2: detached rewards/reference/advantages, then LoRA backward.
+
+    A no-grad policy pass supplies the sampled KL reward. A fresh grad-enabled
+    pass accumulates the on-policy REINFORCE estimator into each LoRA .grad.
+    Microbatch sums are divided by the local rollout count; DDP averages ranks.
+    """
+    policy = accelerator.unwrap_model(model)
+    count = len(rollouts.records)
+    micro = config.per_device_train_batch_size
+    raw_rewards = torch.tensor(
+        reward_fn(
+            completions=rollouts.texts,
+            gt_numerator=[row["gt_numerator"] for row in rollouts.records],
+            gt_denominator=[row["gt_denominator"] for row in rollouts.records],
+        ),
+        device=accelerator.device,
+        dtype=torch.float32,
     )
-    set_seed(config.seed)
-    records, subset = prepare_training_subset(
-        frame,
-        tokenizer,
-        spec,
-        manifest_hash,
-        args.output_dir,
-        write_artifacts=False,
+    if raw_rewards.shape != (count,) or not torch.isfinite(raw_rewards).all():
+        raise ValueError("Verifier must return one finite reward per completion")
+    policy.eval()
+    old_logps, ref_logps = [], []
+    for start in range(0, count, micro):
+        with torch.no_grad(), accelerator.autocast():
+            old_logps.append(
+                sequence_log_probs(
+                    policy,
+                    tokenizer,
+                    rollouts,
+                    start,
+                    start + micro,
+                    accelerator.device,
+                )
+            )
+            with policy.disable_adapter():
+                ref_logps.append(
+                    sequence_log_probs(
+                        policy,
+                        tokenizer,
+                        rollouts,
+                        start,
+                        start + micro,
+                        accelerator.device,
+                    )
+                )
+    scores = accelerator.gather(
+        torch.stack([raw_rewards, torch.cat(old_logps), torch.cat(ref_logps)], dim=1)
     )
-    if not records:
-        raise ValueError(
-            "No training prompts fit the 2048-token budget; see prompt_audit.jsonl"
-        )
-    lora = LoraConfig(
-        task_type="CAUSAL_LM",
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.0,
-        target_modules="all-linear",
-        bias="none",
+    kl = scores[:, 1] - scores[:, 2]
+    rewards = scores[:, 0] - config.beta * kl
+    advantages = leave_one_out_advantages(rewards, config.num_generations)
+    log_stage(
+        accelerator,
+        config.output_dir,
+        iteration,
+        "1.2",
+        status="advantages",
+        verifier_rewards=scores[:, 0].tolist(),
+        sequence_kl=kl.tolist(),
+        policy_log_probs_for_kl=scores[:, 1].tolist(),
+        reference_log_probs=scores[:, 2].tolist(),
+        shaped_rewards=rewards.tolist(),
+        advantages=advantages.reshape(-1, config.num_generations).tolist(),
+        advantage_min=advantages.min().item(),
+        advantage_max=advantages.max().item(),
+        advantage_mean=advantages.mean().item(),
+        advantage_std=advantages.std(unbiased=False).item(),
     )
-    definition = run_definition(spec, manifest_hash, subset, config, lora)
-    if resume:
-        validate_checkpoint(resume, definition, max_steps=args.max_steps)
-    # Validate the previous run before writing any artifacts into its directory.
-    if config.process_index == 0:
-        prepare_training_subset(frame, tokenizer, spec, manifest_hash, args.output_dir)
-    dataset = Dataset.from_list(records)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        dtype=torch.bfloat16 if config.bf16 else torch.float16,
+    local = advantages[
+        accelerator.process_index * count : (accelerator.process_index + 1) * count
+    ]
+    optimizer.zero_grad(set_to_none=True)
+    model.train()
+    loss_value = 0.0
+    gradient_logps = []
+    for start in range(0, count, micro):
+        sync = nullcontext() if start + micro >= count else accelerator.no_sync(model)
+        with sync:
+            with accelerator.autocast():
+                logps = sequence_log_probs(
+                    model, tokenizer, rollouts, start, start + micro, accelerator.device
+                )
+                if not logps.requires_grad:
+                    raise RuntimeError(
+                        "Policy log probabilities must retain the LoRA graph"
+                    )
+                gradient_logps.append(logps.detach())
+                # L = -1/(BG) sum advantage * sum_h log pi(y_h | prompt, y_<h).
+                loss = -(local[start : start + micro] * logps).sum() / count
+            accelerator.backward(loss)
+        loss_value += loss.detach().item()
+    accelerator.unscale_gradients(optimizer)
+    stats = gradient_statistics(model, trainable)
+    stats["loss"] = accelerator.reduce(
+        torch.tensor(loss_value, device=accelerator.device), reduction="mean"
+    ).item()
+    stats["reward_mean"] = scores[:, 0].mean().item()
+    stats["policy_log_probs"] = accelerator.gather(torch.cat(gradient_logps)).tolist()
+    stats["policy_log_probs_require_grad"] = logps.requires_grad
+    stats["reference_log_probs_require_grad"] = any(p.requires_grad for p in ref_logps)
+    return stats
+
+
+def update_parameters(optimizer, config, accelerator, iteration, trainable):
+    """Stage 2: set LR, clip accumulated gradients, step AdamW, measure changes."""
+    lr = config.learning_rate * min(iteration / max(1, config.warmup_steps), 1.0)
+    for group in optimizer.param_groups:
+        group["lr"] = lr
+    before = {name: parameter.detach().clone() for name, parameter in trainable.items()}
+    norm = torch.nn.utils.clip_grad_norm_(
+        list(trainable.values()), config.max_grad_norm, error_if_nonfinite=True
     )
-    model.config.use_cache = False
-    trainer = resumable_trainer_class()(
-        model=model,
-        args=config,
-        processing_class=tokenizer,
-        reward_funcs=numeric_reward,
-        train_dataset=dataset,
-        peft_config=lora,
-        callbacks=[checkpoint_callback(definition)],
+    clipped_norm = (
+        torch.stack([p.grad.detach().float().norm() for p in trainable.values()])
+        .norm()
+        .item()
     )
-    result = trainer.train(resume_from_checkpoint=str(resume) if resume else None)
-    trainer.save_state()
-    trainer.save_model(str(args.output_dir / "adapter"))
-    if trainer.is_world_process_zero():
-        tokenizer.save_pretrained(args.output_dir / "adapter")
-        report = {
-            "model_key": spec.key,
-            "model_source": source,
-            "data_manifest_sha256": manifest_hash,
-            "cohort": manifest["cohort"]["name"],
-            "cohort_train_rows": len(frame),
-            "train_rows": len(records),
-            "training_subset": subset,
-            "training_subset_manifest_sha256": hashlib.sha256(
-                (args.output_dir / "training_subset_manifest.json").read_bytes()
-            ).hexdigest(),
-            "prompts_per_update": args.prompts_per_update,
-            "rollouts_per_prompt": args.rollouts,
-            "max_prompt_length": MAX_PROMPT_LENGTH,
-            "gradient_accumulation_steps": args.gradient_accumulation_steps,
-            "prompt_overflow": "exclude prompt_tokens > 2048; no truncation",
-            "max_completion_length": MAX_COMPLETION_LENGTH,
-            "reference_policy": "pinned base with LoRA disabled",
-            "training_config": config.to_dict(),
-            "resume_from_checkpoint": str(resume.resolve()) if resume else None,
-            "global_step": trainer.state.global_step,
-            "log_history": trainer.state.log_history,
-            "train_metrics": result.metrics,
-        }
-        (args.output_dir / "train_report.json").write_text(
-            json.dumps(report, indent=2) + "\n", encoding="utf-8"
-        )
+    optimizer.step()
+    deltas = {
+        name: (parameter.detach() - before[name]).float().norm()
+        for name, parameter in trainable.items()
+    }
+    values = torch.stack(list(deltas.values()))
+    by_target = {target: [] for target in LORA_TARGET_MODULES}
+    for name, delta in deltas.items():
+        by_target[name.split(".lora_")[0].rsplit(".", 1)[-1]].append(delta)
+    result = {
+        "learning_rate": lr,
+        "gradient_norm_before_clipping": norm.item(),
+        "gradient_norm_after_clipping": clipped_norm,
+        "updated": bool(torch.any(values > 0)),
+        "changed_lora_tensors": int((values > 0).sum()),
+        "lora_parameter_delta_norm": values.norm().item(),
+        "lora_delta_norm_by_target": {
+            name: torch.stack(norms).norm().item() for name, norms in by_target.items()
+        },
+        "optimizer_step_skipped": accelerator.optimizer_step_was_skipped,
+    }
+    optimizer.zero_grad(set_to_none=True)
+    return result

@@ -243,7 +243,7 @@ def verify_boxed_numeric(
 
 
 def numeric_reward(completions, gt_numerator, gt_denominator, **kwargs) -> list[float]:
-    """TRL reward: exact numeric equality of the final box, worth 0 or 1."""
+    """Verifier reward: exact numeric equality of the final box, worth 0 or 1."""
     rewards = []
     for completion, numerator, denominator in zip(
         completions, gt_numerator, gt_denominator, strict=True
