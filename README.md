@@ -5,9 +5,22 @@ training with a shared explicit PyTorch + PEFT loop for two pinned checkpoints. 
 required. Data preparation and tests run on CPU; evaluation and training require CUDA.
 
 The experiment studies how different RL methods change mathematical reasoning
-under fixed data, prompts, verifier rewards and evaluation settings. `hw4.pdf`
-is a reference for RL objectives and update mechanics only. Its model, task,
-cohort, prompts and reward design do not define this project's experiment.
+under fixed data, prompts, verifier rewards and evaluation settings.
+
+The current training direction is called **Outcome-based RL**. The agreed research
+questions concern solving, judging, and correction. See
+[RESEARCH_DIRECTION.md](RESEARCH_DIRECTION.md) for the cross-session research
+direction, confirmed decisions, implementation status, and open experiment designs.
+
+**Reference PDFs are non-binding.** All PDFs in this repository, including
+`hw4.pdf` and `llm_rl_default_final_project.pdf`, are reference materials for
+training methods and statistical observation/diagnostics. They are not project
+specifications and do not need to be followed exactly. Their models, tasks,
+cohorts, prompts, rewards, loss reductions, logging conventions and experiment
+requirements do not automatically apply here. Follow the user's explicit
+instructions and this project's documented decisions; a difference from a PDF
+alone is not a bug or a reason to request clarification or change the experiment.
+
 There is no hyperparameter search or best-model selection stage; retain the
 planned checkpoint evaluations to compare learning trajectories.
 GR-REINFORCE uses a fixed KL coefficient of 0.05; RLOO retains its coefficient
