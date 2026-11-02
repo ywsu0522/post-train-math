@@ -1,7 +1,8 @@
 """Shared explicit policy-gradient engine, independent of individual RL methods.
 
-Read train_loop top to bottom: generate_rollouts, method.estimate_gradients,
-then update_parameters. A method returns only after LoRA .grad is ready.
+Read train_loop top to bottom: generate_rollouts, method.prepare_rollouts,
+then repeat method.estimate_gradients and update_parameters on that batch.
+A gradient estimator returns only after LoRA .grad is ready.
 """
 
 from __future__ import annotations
@@ -77,6 +78,17 @@ class GradientContext:
     def local_advantages(self, advantages, count):
         start = self.accelerator.process_index * count
         return advantages[start : start + count]
+
+
+@dataclass
+class PreparedRollouts:
+    """Detached method inputs fixed until all updates on these rollouts finish."""
+
+    advantages: torch.Tensor
+    reward_mean: float
+    reference_log_probs: list[torch.Tensor] = field(default_factory=list)
+    old_log_probs: list[torch.Tensor] = field(default_factory=list)
+    token_weight: float = 0.0
 
 
 @dataclass
@@ -194,53 +206,85 @@ def train_loop(
             completions=config.generation_batch_size,
         )
 
-        # Stage 1.2: the selected RL method must finish accumulating LoRA .grad.
-        log_stage(accelerator, config.output_dir, iteration, "1.2", status="start")
         context = GradientContext(
             model, tokenizer, optimizer, config, accelerator, iteration, trainable
         )
-        gradient_stats = method.estimate_gradients(
-            context, rollouts, reward_fn=reward_fn
-        )
-        if any(parameter.grad is None for parameter in trainable.values()):
-            raise RuntimeError(
-                f"{method.NAME}.estimate_gradients returned without ready LoRA gradients"
+        prepared = None
+        updates = []
+        for update in range(1, config.num_iterations + 1):
+            # Stage 1.2: prepare once; each pass must leave fresh LoRA .grad ready.
+            update_index = (
+                {"update_in_rollout": update} if config.num_iterations > 1 else {}
             )
-        log_stage(
-            accelerator,
-            config.output_dir,
-            iteration,
-            "1.2",
-            status="complete",
-            **gradient_stats,
-        )
+            log_stage(
+                accelerator,
+                config.output_dir,
+                iteration,
+                "1.2",
+                status="start",
+                **update_index,
+            )
+            if update == 1:
+                prepared = method.prepare_rollouts(
+                    context, rollouts, reward_fn=reward_fn
+                )
+            gradient_stats = method.estimate_gradients(
+                context, rollouts, reward_fn=reward_fn, prepared=prepared
+            )
+            if any(parameter.grad is None for parameter in trainable.values()):
+                raise RuntimeError(
+                    f"{method.NAME}.estimate_gradients returned without ready LoRA gradients"
+                )
+            log_stage(
+                accelerator,
+                config.output_dir,
+                iteration,
+                "1.2",
+                status="complete",
+                **update_index,
+                **gradient_stats,
+            )
 
-        # Stage 2: AdamW consumes the accumulated .grad; verify LoRA changed.
-        log_stage(accelerator, config.output_dir, iteration, "2", status="start")
-        update_stats = update_parameters(
-            optimizer,
-            config,
-            accelerator,
-            optimizer_step=optimizer_steps + 1,
-            trainable=trainable,
-        )
-        optimizer_steps += 1
-        progress = {
-            "rollout_iterations": iteration,
-            "optimizer_steps": optimizer_steps,
-        }
-        log_stage(
-            accelerator,
-            config.output_dir,
-            iteration,
-            "2",
-            status="complete",
-            **update_stats,
-            **progress,
-        )
-        history.append(
-            {"step": iteration, **progress, **gradient_stats, **update_stats}
-        )
+            # Stage 2: the core alone clips, sets LR and steps AdamW.
+            log_stage(
+                accelerator,
+                config.output_dir,
+                iteration,
+                "2",
+                status="start",
+                **update_index,
+            )
+            update_stats = update_parameters(
+                optimizer,
+                config,
+                accelerator,
+                optimizer_step=optimizer_steps + 1,
+                trainable=trainable,
+            )
+            optimizer_steps += 1
+            progress = {
+                "rollout_iterations": iteration,
+                "optimizer_steps": optimizer_steps,
+            }
+            log_stage(
+                accelerator,
+                config.output_dir,
+                iteration,
+                "2",
+                status="complete",
+                **update_index,
+                **update_stats,
+                **progress,
+            )
+            updates.append(
+                {**update_index, **progress, **gradient_stats, **update_stats}
+            )
+
+        # Flat metrics retain the final update; multi-update runs also retain every
+        # individual update, rather than averaging incompatible loss snapshots.
+        history.append({"step": iteration, **updates[-1]})
+        if config.num_iterations > 1:
+            history[-1]["updates"] = updates
 
         if iteration % config.save_steps == 0 or iteration == config.max_steps:
             save_checkpoint(

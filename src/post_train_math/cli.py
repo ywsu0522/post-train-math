@@ -56,7 +56,12 @@ def build_parser() -> argparse.ArgumentParser:
                 )
         else:
             command.add_argument(
-                "--method", choices=("rloo", "gr_reinforce"), default="rloo"
+                "--method", choices=("rloo", "gr_reinforce", "grpo"), default="rloo"
+            )
+            command.add_argument(
+                "--num-iterations",
+                type=int,
+                help="Full-rollout optimizer updates per batch; default 2 for GRPO, 1 otherwise",
             )
             command.add_argument(
                 "--prompts-per-update", type=int, default=8, help="Global B"

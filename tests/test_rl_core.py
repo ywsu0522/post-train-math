@@ -30,7 +30,9 @@ def test_core_updates_only_after_method_populates_gradients(
         return result
 
     monkeypatch.setattr(rl_core, "update_parameters", update)
-    method = SimpleNamespace(NAME="rloo", estimate_gradients=estimate)
+    method = SimpleNamespace(
+        NAME="rloo", prepare_rollouts=rloo.prepare_rollouts, estimate_gradients=estimate
+    )
     rl_core.train_loop(*args, method=method)
     assert calls == ["gradients_ready", "parameters_updated"]
     assert args[3].state_dict()["state"]
@@ -38,7 +40,11 @@ def test_core_updates_only_after_method_populates_gradients(
 
 def test_core_rejects_method_returning_without_gradients(tmp_path, tiny_training):
     args = tiny_training(tmp_path, max_steps=1)
-    method = SimpleNamespace(NAME="rloo", estimate_gradients=lambda *a, **k: {})
+    method = SimpleNamespace(
+        NAME="rloo",
+        prepare_rollouts=rloo.prepare_rollouts,
+        estimate_gradients=lambda *a, **k: {},
+    )
     with pytest.raises(RuntimeError, match="without ready LoRA gradients"):
         rl_core.train_loop(*args, method=method)
     assert not args[3].state_dict()["state"]
@@ -53,6 +59,16 @@ def test_method_selection_and_defaults_are_explicit(tmp_path):
     assert config.beta == 0.05
     assert config.to_dict()["objective"]["kl_reduction"] == "global_rollout_token_mean"
     assert TrainConfig(tmp_path).beta == 0.01
+    grpo = TrainConfig(tmp_path, method="grpo")
+    assert grpo.beta == 0.05 and grpo.num_iterations == 2
+    assert grpo.to_dict()["objective"]["clip_eps"] == 0.2
+    assert TrainConfig(tmp_path, method="grpo", num_iterations=1).num_iterations == 1
+    for method in ("rloo", "gr_reinforce"):
+        with pytest.raises(ValueError, match="one on-policy update"):
+            TrainConfig(tmp_path, method=method, num_iterations=2)
+    for count in (0, -1, 1.5, True):
+        with pytest.raises(ValueError, match="positive integer"):
+            TrainConfig(tmp_path, method="grpo", num_iterations=count)
     with pytest.raises(ValueError, match="Unknown RL method"):
         get_method("missing")
     with pytest.raises(SystemExit):

@@ -55,7 +55,7 @@ def test_checkpoint_reloads_for_inference_without_final_report(tmp_path, tiny_tr
 
 @pytest.mark.parametrize(
     "method_name,stop_step",
-    [("rloo", 1), ("rloo", 3), ("rloo", 21), ("gr_reinforce", 3)],
+    [("rloo", 1), ("rloo", 3), ("rloo", 21), ("gr_reinforce", 3), ("grpo", 3)],
 )
 def test_checkpoint_restores_adamw_rng_and_sampling_across_warmup(
     tmp_path, tiny_training, stop_step, method_name
@@ -76,8 +76,9 @@ def test_checkpoint_restores_adamw_rng_and_sampling_across_warmup(
     checkpoint = partial[4].output_dir / f"checkpoint-{stop_step}"
     resumed = tiny_training(tmp_path / "resumed", max_steps=23, method=method_name)
     history = train_loop(*resumed, method=method, resume=checkpoint)
+    num_iterations = resumed[4].num_iterations
     assert history == expected_history
-    assert history[0]["learning_rate"] == pytest.approx(1e-3 / 20)
+    assert history[0]["learning_rate"] == pytest.approx(1e-3 * num_iterations / 20)
     assert history[19]["learning_rate"] == history[-1]["learning_rate"] == 1e-3
     assert_same_state(expected_weights, dict(resumed[0].named_parameters()))
     assert_same_state(expected_optimizer, resumed[3].state_dict())
@@ -85,9 +86,13 @@ def test_checkpoint_restores_adamw_rng_and_sampling_across_warmup(
         (resumed[4].output_dir / "checkpoint-23/trainer_state.json").read_text()
     )
     assert state["global_step"] == 23
-    assert state["rollout_iterations"] == state["optimizer_steps"] == 23
+    assert state["rollout_iterations"] == 23
+    assert state["optimizer_steps"] == 23 * num_iterations
     assert history[-1]["rollout_iterations"] == 23
-    assert history[-1]["optimizer_steps"] == 23
+    assert history[-1]["optimizer_steps"] == 23 * num_iterations
+    if num_iterations > 1:
+        assert history[9]["updates"][-1]["learning_rate"] == 1e-3
+        assert history[0]["updates"][0]["learning_rate"] == pytest.approx(1e-3 / 20)
 
 
 def test_legacy_single_counter_checkpoint_resumes(tmp_path, tiny_training):
@@ -144,7 +149,7 @@ def test_incomplete_incompatible_and_inference_only_checkpoints_are_rejected(
         load_checkpoint(checkpoint, args[0], args[3], args[5], definition, 2)
 
 
-@pytest.mark.parametrize("method_name", ["rloo", "gr_reinforce"])
+@pytest.mark.parametrize("method_name", ["rloo", "gr_reinforce", "grpo"])
 def test_cli_training_setup_runs_real_loop_and_exports_evaluable_adapter(
     tmp_path, tiny_training, monkeypatch, method_name
 ):
@@ -221,12 +226,19 @@ def test_cli_training_setup_runs_real_loop_and_exports_evaluable_adapter(
     assert report["training_config"]["method"] == method_name
     assert report["training_config"]["beta"] == get_method(method_name).DEFAULT_BETA
     assert report["global_step"] == len(report["log_history"]) == 2
-    assert report["rollout_iterations"] == report["optimizer_steps"] == 2
+    assert report["rollout_iterations"] == 2
+    assert (
+        report["optimizer_steps"] == 2 * get_method(method_name).DEFAULT_NUM_ITERATIONS
+    )
     assert (args.output_dir / "training_subset.jsonl").is_file()
     metadata = adapter_metadata(
         args.output_dir / "adapter", MODELS["olmo2"], "data-hash"
     )
-    assert metadata["rollout_iterations"] == metadata["optimizer_steps"] == 2
+    assert metadata["rollout_iterations"] == 2
+    assert (
+        metadata["optimizer_steps"]
+        == 2 * get_method(method_name).DEFAULT_NUM_ITERATIONS
+    )
     assert metadata["prompts_per_rollout_iteration"] == 2
 
 

@@ -22,7 +22,7 @@ def fixed_rollouts(records):
 
 
 @pytest.mark.parametrize("model_key", ["olmo2", "granite"])
-@pytest.mark.parametrize("method_name", ["rloo", "gr_reinforce"])
+@pytest.mark.parametrize("method_name", ["rloo", "gr_reinforce", "grpo"])
 def test_three_stages_verify_reward_gradients_and_real_lora_updates(
     tmp_path, tiny_training, monkeypatch, model_key, method_name
 ):
@@ -70,7 +70,7 @@ def test_three_stages_verify_reward_gradients_and_real_lora_updates(
             event["stage"]
             for event in events
             if event["iteration"] == iteration and event.get("status") == "complete"
-        ] == ["1.1", "1.2", "2"]
+        ] == ["1.1"] + ["1.2", "2"] * config.num_iterations
         advantages = next(
             event
             for event in events

@@ -8,6 +8,7 @@ from post_train_math.answers import numeric_reward
 from post_train_math.rl_core import (
     GradientContext,
     LossTerms,
+    PreparedRollouts,
     Rollouts,
     accumulate_gradients,
     log_advantages,
@@ -17,6 +18,7 @@ from post_train_math.rl_core import (
 
 NAME = "rloo"
 DEFAULT_BETA = 0.01
+DEFAULT_NUM_ITERATIONS = 1
 OBJECTIVE = {
     "advantage": "leave_one_out",
     "policy_reduction": "sequence_sum_then_completion_mean",
@@ -32,10 +34,10 @@ def leave_one_out_advantages(rewards, group_size):
     return (grouped - baseline).reshape(-1).detach()
 
 
-def estimate_gradients(
+def prepare_rollouts(
     context: GradientContext, rollouts: Rollouts, *, reward_fn=numeric_reward
 ):
-    """Populate LoRA .grad using the original on-policy RLOO estimator."""
+    """Compute fixed KL-shaped rewards and LOO advantages for this batch."""
     accelerator, config = context.accelerator, context.config
     policy = accelerator.unwrap_model(context.model)
     count = len(rollouts.records)
@@ -81,12 +83,31 @@ def estimate_gradients(
         reference_log_probs=scores[:, 2].tolist(),
         shaped_rewards=rewards.tolist(),
     )
-    local = context.local_advantages(advantages, count)
+    return PreparedRollouts(
+        advantages=context.local_advantages(advantages, count),
+        reward_mean=scores[:, 0].mean().item(),
+        reference_log_probs=ref_logps,
+    )
+
+
+def estimate_gradients(
+    context: GradientContext,
+    rollouts: Rollouts,
+    *,
+    reward_fn=numeric_reward,
+    prepared=None,
+):
+    """Populate LoRA .grad using the original on-policy RLOO estimator."""
+    if prepared is None:
+        prepared = prepare_rollouts(context, rollouts, reward_fn=reward_fn)
+    count = len(rollouts.records)
 
     def loss_fn(logps, start, end):
-        return LossTerms(-(local[start:end] * logps.sums).sum() / count)
+        return LossTerms(-(prepared.advantages[start:end] * logps.sums).sum() / count)
 
     stats = accumulate_gradients(context, rollouts, loss_fn)
-    stats["reward_mean"] = scores[:, 0].mean().item()
-    stats["reference_log_probs_require_grad"] = any(p.requires_grad for p in ref_logps)
+    stats["reward_mean"] = prepared.reward_mean
+    stats["reference_log_probs_require_grad"] = any(
+        p.requires_grad for p in prepared.reference_log_probs
+    )
     return stats

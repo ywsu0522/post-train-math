@@ -1,6 +1,6 @@
 # Outcome-based RL：研究方向與決策紀錄
 
-更新日期：2026-11-01。本文保存使用者已確認的研究方向，供同專案後續 session 延續工作。
+更新日期：2026-11-03。本文保存使用者已確認的研究方向，供同專案後續 session 延續工作。
 本文區分「已確認方向」、「目前實作」與「待決定設計」；研究問題的確認不代表所有候選實驗已定案或已實作。使用者後續的明確指示優先，方向改變時應同步更新本文。
 
 ## 1. 已確認的定位與名稱
@@ -52,9 +52,9 @@
 
 | 項目 | 目前狀態 |
 | --- | --- |
-| 訓練方法 | RLOO 與 GR-REINFORCE 已接入 CLI；GRPO 尚未接入 |
-| 共用架構 | `rl_core.py` 依序執行 rollout → method 計算並累積 gradients → core 更新參數；目前每批 rollout 更新一次 |
-| 方法模組 | `rloo.py` 與 `gr_reinforce.py` 扮演同類型角色，持有方法的 advantage 與 objective 設計 |
+| 訓練方法 | RLOO、GR-REINFORCE、GRPO 均已接入 CLI，無 TRL 依賴 |
+| 共用架構 | `rl_core.py` 執行 rollout → method 準備固定資料 → 重複 gradient estimation／core 更新參數；GRPO 預設每批兩次，另兩方法一次 |
+| 方法模組 | 三方法均使用 `prepare_rollouts` 與 `estimate_gradients`；method 持有 advantage／objective，optimizer 由 core 執行 |
 | RL 前模型 | 固定的 OLMo-2-0425-1B-SFT 與 Granite-3.3-2B-Instruct；是 SFT／instruct 起點，不是未經 instruction tuning 的 pretrained base |
 | 資料 | 原始 MATH train/test 分離；固定 boxed-numeric cohort：5,589 train、3,686 test |
 | 固定評估 | 同一份分層抽樣的 512 題，greedy decoding；亦可執行完整 3,686 題 |
@@ -72,7 +72,7 @@
 - 保留目前固定資料、prompt、verifier 與資料切分。任何未來泛化或變體測試應有獨立定義與紀錄。
 - 保留無 reward 差異的 groups；其出現屬於模型與資料的觀測現象，不預設要過濾或重抽。Raw reward 相同也不代表含 KL 的所有方法都沒有 gradient。
 - 保留未產生 EOS、達生成上限的 completions，沿用目前評分與訓練行為。
-- RLOO 的 KL 係數為 0.01，GR-REINFORCE 為 0.05；數值與 KL 放置、reduction 不同，不能視為同等正則化強度。
+- RLOO 的 KL 係數為 0.01，GR-REINFORCE 與 GRPO 為 0.05；數值與 KL 放置、reduction 不同，不能視為同等正則化強度。
 - Rollout iterations 與 optimizer steps 分開計數；learning-rate warmup 以 optimizer steps 計算。
 - Gradient overflow／non-finite loss 或 gradient 應中止；不能把 AMP 跳過更新計成成功 optimizer step。
 - 目前訓練 sampling 為 temperature=1、top-p=1、top-k=0，配合 raw-policy log-probs。未來若改 sampling，需要重新檢查 objective 與記錄，不能默默沿用原假設。
@@ -104,13 +104,24 @@
 
 ## 6. GRPO 的研究與工程接點
 
-已確定要加入 GRPO，但其完整 objective 與更新 protocol 尚未定案。
+GRPO 已實作。依使用者 2026-11-03 指示，模糊細節優先參考講義與作業 GitHub，但保留本專案既有設定；並未引入作業任務、模型或交付要求。
 
-值得檢驗的機制問題是：**同一批 rollout 多更新一次，是否增加效益，付出多少成本？**
+值得檢驗的機制問題仍是：**同一批 rollout 多更新一次，是否增加效益，付出多少成本？**
 
-從 GRPO surrogate 可推導：若更新起點 policy=old policy、ratio=1，且 advantage、KL、mask 與 reduction 都對齊，第一次更新的 policy gradient 可與 GR-REINFORCE 相同。Clipping 在這個起點尚未限制更新；重用資料後才會出現更明顯的差異。這是附帶條件的公式推論，不代表現有兩份實作已經等價。
+若更新起點 policy=old policy、ratio=1，且 advantage、KL、mask 與 reduction 對齊，第一次 gradient 可與 GR-REINFORCE 相同。微型模型測試已驗證此性質；兩者的 policy loss 數值不同，多次更新後也不等價。
 
-每批更新一次／兩次是候選比較；**兩次更新不是已確認的固定設定**。若採多次更新，core 應清楚呈現對固定 rollouts 的 gradient estimation → parameter update 迴圈，固定該批的 old-policy log-probs 與 advantages，逐次重算 current-policy log-probs，並正確增加 optimizer-step 計數。方法模組仍與 RLOO、GR-REINFORCE 保持同類型角色，不應各自複製整套訓練工程。
+目前採用的 GRPO 配方：
+
+- 同一 BG rollout batch 預設完成兩次完整 gradient accumulation／optimizer update；`--num-iterations 1` 可做單次更新比較。RLOO 與 GR-REINFORCE 限一次。
+- Advantage 沿用 GR-REINFORCE 的 population std、ε=1e-6、clip ±5，無第二次標準化。
+- 固定 old-policy token log-probs；policy log-ratio 先 clamp ±20，再取 exp，PPO clip ε=0.2。Policy term 為每條 completion token mean，再平均 completions。
+- β=0.05，KL 共用 GR-REINFORCE 的 sampled `expm1(delta)-delta`，delta clamp ±20；以全批所有 ranks 的有效 completion tokens 平均，不加 current／old ratio 權重或 entropy bonus。重用資料時不宣稱這是精確 current-policy KL。
+- Old-policy log-probs、reference log-probs、rewards、advantages 每批只準備一次並固定，逐次重算 current-policy log-probs。Reference 固定為停用 adapter 的 RL 前模型。
+- 保留固定 prompt-major microbatch 順序。與作業逐 minibatch mean 的平均不同，使用全批 KL token mean，維持不等長回答在 microbatch／rank 切分下的同一 objective。
+- Core 統一執行梯度檢查、裁剪與更新。每次更新均留紀錄；history 每 rollout 一列，flat metrics 為最後一次更新，`updates` 保留所有更新結果。
+- Checkpoint 僅存整批更新完成的狀態；中途失敗從前一完整 checkpoint 重跑，沒有 batch 中途續訓。Warmup 繼續依 optimizer steps 計算。
+
+此配方解決先前尚未定案的 GRPO 實作細節；正式研究比較規模、資源預算與消融組合仍待決定。測試驗證程式與公式，不代表已完成正式 GPU 模型能力實驗。
 
 ## 7. 延伸方向與尚未決定的事項
 
@@ -123,7 +134,7 @@
 - **泛化與推理過程檢查**：經核對的題目改寫、數值變體、其他 benchmark 與盲評推理抽查皆為候選，不自動取代固定 cohort。
 - **資源與規模**：GPU 型號／數量／時數、training seeds、每題取樣次數、重複取樣的 checkpoints、統計檢定與判斷／修正 prompts 尚未決定。先前提過每題 16 次取樣、三個 training seeds 等數量，皆只是建議。
 
-建議推進順序是先建立 RL 前模型的觀測，完成 GRPO 與必要紀錄，再做三方法解題比較；以保存的候選解答開始 RQ2 小型診斷，之後推進 RQ3。這是工作順序建議，使用者可調整，不能據此推定已授權執行所有實驗。
+建議推進順序是先建立 RL 前模型的觀測，使用已實作的三方法與必要紀錄進行解題比較；以保存的候選解答開始 RQ2 小型診斷，之後推進 RQ3。這是工作順序建議，使用者可調整，不能據此推定已授權執行所有實驗。
 
 ## 8. 討論時使用的研究參考
 

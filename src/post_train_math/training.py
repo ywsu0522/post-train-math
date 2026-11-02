@@ -27,6 +27,10 @@ def get_method(name):
         from post_train_math import gr_reinforce
 
         return gr_reinforce
+    if name == "grpo":
+        from post_train_math import grpo
+
+        return grpo
     raise ValueError(f"Unknown RL method: {name}")
 
 
@@ -34,6 +38,7 @@ def get_method(name):
 class TrainConfig:
     output_dir: Path
     method: str = "rloo"
+    num_iterations: int | None = None
     prompts_per_update: int = 8
     num_generations: int = 4
     per_device_train_batch_size: int = 1
@@ -62,6 +67,12 @@ class TrainConfig:
         method = get_method(self.method)
         if self.beta is None:
             self.beta = method.DEFAULT_BETA
+        if self.num_iterations is None:
+            self.num_iterations = method.DEFAULT_NUM_ITERATIONS
+        if type(self.num_iterations) is not int or self.num_iterations < 1:
+            raise ValueError("num_iterations must be a positive integer")
+        if self.method != "grpo" and self.num_iterations != 1:
+            raise ValueError("RLOO and GR-REINFORCE require one on-policy update")
 
     @property
     def generation_batch_size(self):
@@ -72,7 +83,6 @@ class TrainConfig:
             **asdict(self),
             "output_dir": str(self.output_dir),
             "generation_batch_size": self.generation_batch_size,
-            "num_iterations": 1,
             "sampling": "with replacement; torch seed + iteration",
             "lr_scheduler_type": "linear warmup then constant",
             "warmup_steps_unit": "optimizer_steps",
@@ -92,6 +102,7 @@ def build_config(
     learning_rate,
     use_cpu=False,
     method="rloo",
+    num_iterations=None,
 ):
     import torch
 
@@ -110,6 +121,7 @@ def build_config(
     return TrainConfig(
         output_dir=Path(output_dir),
         method=method,
+        num_iterations=num_iterations,
         prompts_per_update=prompts,
         num_generations=rollouts,
         per_device_train_batch_size=per_device_train_batch_size,
@@ -175,6 +187,7 @@ def run_train(args):
     config = build_config(
         args.output_dir,
         method=args.method,
+        num_iterations=args.num_iterations,
         prompts=args.prompts_per_update,
         rollouts=args.rollouts,
         per_device_train_batch_size=args.per_device_train_batch_size,
